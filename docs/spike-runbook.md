@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Validate the core primitive of the PontLDK architecture before building the Nostr layer:
+Validate the core primitive of the PontHTLC architecture before building the Nostr layer:
 
 > The buyer's LDK node registers `H = sha256(P)` from an HTLC's DHT preimage that it does NOT know (via `create_inbound_payment_for_hash`), signs a BOLT11 hold invoice with the preimage unknown, and keeps the HTLC in-flight until a manual `claim_funds(...)` / `fail_htlc_backwards(...)` call, or LDK expiry semantics take over past `claim_deadline`.
 
@@ -17,7 +17,7 @@ Prerequisites: Docker Desktop running, Rust toolchain installed.
 .\scripts\spike.ps1 -Scenario happy   # or fail | hold
 ```
 
-The script starts a regtest `bitcoind` container (RPC port `18923`, user/pass `pontldk`), then builds and runs the `spike` binary with the chosen scenario.
+The script starts a regtest `bitcoind` container (RPC port `18923`, user/pass `ponthtlc`), then builds and runs the `spike` binary with the chosen scenario.
 
 Scenario flags in the binary (also standalone runnable):
 

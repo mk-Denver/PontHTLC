@@ -1,9 +1,18 @@
-# PontLDK
+# PontHTLC
 
 Non-custodial HTLC-based Bitcoin/Lightning escrow for P2P disputed trades, using
-[Pontmore protocol](https://github.com/anomalyco/pontmore) descriptors (`PIP-01`, `PIP-02`,
-`pontmore/escrow-htlc@1`), a 2-of-3 Shamir split preimage, and Nostr (`NIP-59` gift wraps)
-as the transport among buyer / seller / notifier / arbitrator.
+the [Pontmore protocol](https://github.com/pontmore/protocol) `pontmore/swap@1`
+profile as the coordination base, a 2-of-3 Shamir split preimage extension, and
+Nostr (`NIP-59` gift wraps) as the transport among buyer / seller / arbitrator.
+
+We do **not** invent a new Pontmore profile. We conform to the existing
+[`pontmore/swap@1`](https://github.com/pontmore/protocol/blob/main/profiles/swap-v1.md)
+profile (Experimental, PIP-02 v2), which already defines the escrow kernel
+(`core/secure`, `core/settle`, `core/refund`, `core/authorize_settlement`,
+`core/authorize_refund`, `core/open_dispute`, `core/resolve_dispute`) and
+supports Lightning as a `bitcoin.network` value. Our 2-of-3 Shamir split
+preimage is an implementation-private extension to the swap profile's
+private-payload boundary — it does not alter the public root or action schema.
 
 ## Current status: Week 1 de-risking spike
 
@@ -36,7 +45,7 @@ workload, you only need the Windows 11 SDK (10.0.26100.0) component.
 All `cargo build` / `cargo run` commands on Windows must go through the MSVC environment:
 
 ```powershell
-cmd /c "call ""C:\Program Files\Microsoft Visual Studio\<edition>\VC\Auxiliary\Build\vcvars64.bat"" >nul && cargo build -p pontldk-spike 2>&1"
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\<edition>\VC\Auxiliary\Build\vcvars64.bat"" >nul && cargo build -p ponthtlc-spike 2>&1"
 ```
 
 ### Linux / macOS
@@ -47,7 +56,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # start the bitcoind container
 docker compose up -d
 # build and run the spike
-cargo run -p pontldk-spike -- --scenario happy
+cargo run -p ponthtlc-spike -- --scenario happy
 ```
 
 ### Running the spike
@@ -58,6 +67,8 @@ cargo run -p pontldk-spike -- --scenario happy
 ```
 
 ## Architecture sketch (spike-validated parts in bold)
+
+Mapped to `pontmore/swap@1` kernel actions:
 
 1. **Seller originates a random 32-byte preimage `P` and publishes `H=sha256(P)` via Nostr.**
 2. Seller splits `P` into 2-of-3 GF(2^8) Shamir shares:
@@ -71,12 +82,27 @@ cargo run -p pontldk-spike -- --scenario happy
 6. Seller trusts the buyer node (per our dispute contract); the arbitrator is a nostr-only
    (non-listening) participant and cannot fund/settle unilaterally.
 
+### LDK primitive → `pontmore/swap@1` kernel mapping
+
+| LDK primitive | `pontmore/swap@1` action | Effect |
+| --- | --- | --- |
+| `create_inbound_payment_for_hash(H)` | (setup) | Buyer registers hold invoice |
+| `pay_for_bolt11_invoice(...)` | `core/secure` | HTLC funded and in-flight |
+| `PaymentClaimable { preimage: None }` | (secured state) | Hold verified — no auto-claim |
+| `claim_funds(P)` | `core/authorize_settlement` + `core/settle` | Buyer releases preimage; seller sees `PaymentSent` |
+| `fail_htlc_backwards(H)` | `core/authorize_refund` + `core/refund` | Buyer rejects; seller sees `PaymentFailed` |
+| mine past `claim_deadline` | `core/expire` | HTLC auto-fails or manual note |
+| arbitrator delivers s3 via Nostr | `core/open_dispute` + `core/resolve_dispute` | Dispute resolution with tiebreaker share |
+
 ## Planned layout
 
 ```
-crates/spike     manual claim demo + regtest bitcoind harness (current)
-crates/shamir    GF(2^8) 2-of-3 preimage split / reconstruct (spike-validated)
-crates/nostr     NIP-59 share/publish handling (planned)
-crates/arbitrator Nostr-listen-only arbitrator (planned)
-docs/            runbooks + ADRs (claim_deadline semantics observed during spike)
+crates/spike       manual claim demo + regtest bitcoind harness (current)
+crates/ponthtlc    persistent LDK node daemon (planned, issue #1)
+crates/shamir      GF(2^8) 2-of-3 preimage split / reconstruct (spike-validated)
+crates/nostr       NIP-59 share/publish handling (planned, issue #2)
+crates/escrow      pontmore/swap@1 state machine + Shamir coordination (planned, issue #2)
+crates/api         REST + WebSocket server (planned, issue #3)
+frontend/          web UI (planned, issue #4)
+docs/              runbooks + ADRs (claim_deadline semantics observed during spike)
 ```

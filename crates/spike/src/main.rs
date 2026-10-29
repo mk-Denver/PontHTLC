@@ -57,8 +57,8 @@ fn parse_config() -> SpikeConfig {
             .get("bitcoind-port")
             .map(|v| v.parse().unwrap())
             .unwrap_or(18923),
-        rpc_user: args.get("rpc-user").cloned().unwrap_or_else(|| "pontldk".to_string()),
-        rpc_pass: args.get("rpc-pass").cloned().unwrap_or_else(|| "pontldk".to_string()),
+        rpc_user: args.get("rpc-user").cloned().unwrap_or_else(|| "ponthtlc".to_string()),
+        rpc_pass: args.get("rpc-pass").cloned().unwrap_or_else(|| "ponthtlc".to_string()),
         data_root: args.get("data-root").cloned().unwrap_or_else(|| "spike-data".to_string()),
         scenario,
     }
@@ -221,7 +221,7 @@ async fn register_manual_hold_invoice(
 
     let invoice = lightning_invoice::InvoiceBuilder::new(lightning_invoice::Currency::Regtest)
         .amount_milli_satoshis(amount_msat)
-        .description("PontLDK spike manual hold invoice".to_string())
+        .description("PontHTLC spike manual hold invoice".to_string())
         .payment_hash(payment_hash_sha256)
         .payment_secret(payment_secret)
         .current_timestamp()

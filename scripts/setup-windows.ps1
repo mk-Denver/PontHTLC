@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Bootstraps Windows build prerequisites for PontLDK.
+    Bootstraps Windows build prerequisites for PontHTLC.
 .DESCRIPTION
     Checks for and installs (if missing):
       - Rust toolchain (via rustup)

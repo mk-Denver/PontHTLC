@@ -13,5 +13,5 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-cargo run -p pontldk-spike -- --scenario $Scenario
+cargo run -p ponthtlc-spike -- --scenario $Scenario
 exit $LASTEXITCODE

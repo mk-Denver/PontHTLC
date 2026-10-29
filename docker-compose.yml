@@ -1,14 +1,14 @@
 services:
   bitcoind:
     image: bitcoin/bitcoin:29
-    container_name: pontldk-bitcoind
+    container_name: ponthtlc-bitcoind
     command: >-
       -regtest
       -rpcbind=0.0.0.0
       -rpcallowip=0.0.0.0/0
       -rpcport=18923
-      -rpcuser=pontldk
-      -rpcpassword=pontldk
+      -rpcuser=ponthtlc
+      -rpcpassword=ponthtlc
       -printtoconsole=0
     ports:
       - "18923:18923"

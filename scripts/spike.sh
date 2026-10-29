@@ -7,4 +7,4 @@ cd "$REPO_ROOT"
 
 docker compose up -d bitcoind
 
-cargo run -p pontldk-spike -- --scenario "$SCENARIO"
+cargo run -p ponthtlc-spike -- --scenario "$SCENARIO"
