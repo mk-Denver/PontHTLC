@@ -65,6 +65,12 @@ new profiles. The 2-of-3 Shamir split is a private-payload extension.
 See [docs/spike-runbook.md](docs/spike-runbook.md) for the LDK-to-kernel
 action mapping table.
 
+The reference implementation is [`pontmore/pontmore`](https://github.com/pontmore/pontmore)
+(`pontmored` daemon + economic connector framework). Our MVP wraps LDK
+primitives as connector-compatible typed effects (`escrow_secure`,
+`escrow_settle`, `escrow_refund`, `resolve_dispute`) so a future
+`pontmored` deployment can dispatch them as subprocess operations.
+
 ## Testing before committing
 
 ```bash

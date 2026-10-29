@@ -67,3 +67,27 @@ cargo run -p spike -- --scenario hold
 - No `lightning_background_processsor` — a manual event pump loops `get_and_clear_pending_events` + `chain_monitor.process_pending_events()` every 20 ms.
 - No gossip: `route_handler`/`onion_message_handler`/`custom_message_handler` are `IgnoringMessageHandler`.
 - Fees are hard-coded constants rather than `estimatesmartfee`.
+
+## Pontmore reference implementation
+
+The [`pontmore/pontmore`](https://github.com/pontmore/pontmore) repo is the reference
+implementation of the Pontmore protocol (`pontmored` daemon + economic
+connector framework). It defines the production architecture:
+
+- `pontmored` — PostgreSQL-backed durable signed-event storage, SSE
+  event stream (`GET /v1/stream`), `POST /v1/events` ingestion
+- Economic connectors — `escrow_secure`, `escrow_settle`, `escrow_refund`,
+  `resolve_dispute` as typed subprocess effects (see
+  [`deploy/connectors.example.json`](https://github.com/pontmore/pontmore/blob/main/deploy/connectors.example.json))
+- `pontmore-tck` — compatibility vector runner
+- PIP-02 boundary: `validate_swap_coordination` accepts signed kind
+  `7300`/`7301` events + `DescriptorBinding`
+
+Our MVP does not replicate the full `pontmored` stack. Instead, the
+escrow state machine (issue #2) wraps LDK primitive calls as
+connector-compatible typed effects matching the `pontmored` connector
+manifest schema, so a future `pontmored` deployment can dispatch
+PontHTLC's LDK node as an economic connector subprocess.
+
+Protocol baseline pinned to Pontmore protocol commit
+`d9a1eb3e8a24e2101f5a4024df1ce85a8d934f75` (2026-09-14).

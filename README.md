@@ -7,6 +7,11 @@ Built on the [Pontmore protocol](https://github.com/pontmore/protocol)
 profile, with a 2-of-3 Shamir split preimage extension and Nostr
 (`NIP-59`) as the transport layer.
 
+**Hosted node architecture**: users don't run their own LDK node — a
+service provider runs `ponthtlc` and users interact via browser + Nostr.
+Non-custodiality is preserved because the preimage is reconstructed
+client-side. See [docs/infrastructure.md](docs/infrastructure.md).
+
 ## Setup
 
 ### Prerequisites
@@ -47,6 +52,7 @@ cargo run -p ponthtlc-spike -- --scenario happy
 
 | Document | Description |
 | --- | --- |
+| [docs/infrastructure.md](docs/infrastructure.md) | Hosted node architecture (cost model, trust model, preimage flow) |
 | [docs/spike-runbook.md](docs/spike-runbook.md) | Spike design, scenario matrix, API notes |
 | [ROADMAP.md](ROADMAP.md) | Project roadmap (spike → MVP → post-MVP) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
