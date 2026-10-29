@@ -7,6 +7,10 @@ edition = "2021"
 name = "spike"
 path = "src/main.rs"
 
+[lib]
+name = "ponthtlc_spike"
+path = "src/lib.rs"
+
 [dependencies]
 lightning = "0.2.0"
 lightning-invoice = { version = "0.34.0", features = ["std"] }

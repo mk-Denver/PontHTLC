@@ -28,7 +28,7 @@ impl Share {
     }
 }
 
-fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+pub fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     let mut product: u8 = 0;
     while b != 0 {
         if b & 1 != 0 {
@@ -44,7 +44,7 @@ fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     product
 }
 
-fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
+pub fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
     let mut accumulator: u8 = 1;
     while exponent > 0 {
         if exponent & 1 != 0 {
@@ -56,11 +56,11 @@ fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
     accumulator
 }
 
-fn gf_inv(value: u8) -> u8 {
+pub fn gf_inv(value: u8) -> u8 {
     gf_pow(value, 254)
 }
 
-fn eval_poly(coeffs: &[u8; 2], x: u8) -> u8 {
+pub fn eval_poly(coeffs: &[u8; 2], x: u8) -> u8 {
     let mut value: u8 = coeffs[0];
     let mut x_power: u8 = 1;
     for coeff in &coeffs[1..] {
