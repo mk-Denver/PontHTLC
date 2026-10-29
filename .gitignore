@@ -1,0 +1,7 @@
+/target
+/.cargo
+**/target
+spike-data/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+services:
+  bitcoind:
+    image: bitcoin/bitcoin:29
+    container_name: pontldk-bitcoind
+    command: >-
+      -regtest
+      -rpcbind=0.0.0.0
+      -rpcallowip=0.0.0.0/0
+      -rpcport=18923
+      -rpcuser=pontldk
+      -rpcpassword=pontldk
+      -printtoconsole=0
+    ports:
+      - "18923:18923"
+    volumes:
+      - bitcoind-data:/root/.bitcoin
+
+volumes:
+  bitcoind-data:
