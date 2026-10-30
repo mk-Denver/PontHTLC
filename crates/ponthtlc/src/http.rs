@@ -26,6 +26,8 @@ use crate::node::Node;
 use crate::tenancy::{EscrowRecord, EscrowStore};
 
 const NOSTR_PUBKEY_HEADER: &str = "x-nostr-pubkey";
+const ARBITRATOR_SHARE_TERMS: &str = "arbitrator-share";
+const ARBITRATOR_SHARE_NAME: &str = "s3";
 
 pub trait HoldNode: Send + Sync {
     fn register_hold(&self, payment_hash: [u8; 32], amount_msat: u64) -> Result<String, String>;
@@ -72,6 +74,7 @@ impl HoldNode for Arc<Node> {
             payment_hash,
             payment_secret,
             amount_msat,
+            lightning_invoice::Currency::Regtest,
         )?;
         Ok(invoice.to_string())
     }
@@ -249,8 +252,10 @@ async fn fund_escrow<N: HoldNode>(
     let payer = owner_from_headers(&headers)?;
     let owns_invoice = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
+        let parsed = invoice::parse_bolt11(&body.bolt11).map_err(bad_request)?;
+        let ph = hex::encode(payment_hash_bytes(&parsed));
         store.get_owned(&id, &payer).is_some()
-            || store.list(&payer).iter().any(|record| record.bolt11 == body.bolt11)
+            || store.list(&payer).iter().any(|record| record.payment_hash == ph)
     };
     if owns_invoice {
         return Err((
@@ -276,7 +281,15 @@ async fn fail_escrow<N: HoldNode>(
     let payment_hash = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
         match store.get_owned(&id, &owner) {
-            Some(record) => decode_fixed_hex(&record.payment_hash, "payment_hash")?,
+            Some(record) => {
+                if record.protocol_status == "settled" || record.protocol_status == "refunded" {
+                    return Err((StatusCode::CONFLICT, "escrow is already settled or refunded".to_string()));
+                }
+                if record.protocol_status == "fail_submitted" || record.protocol_status == "disputed" {
+                    return Err((StatusCode::CONFLICT, "escrow is already failed or disputed".to_string()));
+                }
+                decode_fixed_hex(&record.payment_hash, "payment_hash")?
+            }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
         }
     };
@@ -312,7 +325,15 @@ async fn dispute_escrow<N: HoldNode>(
     let payment_hash = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
         match store.get_owned(&id, &owner) {
-            Some(record) => record.payment_hash,
+            Some(record) => {
+                if record.protocol_status == "settled" || record.protocol_status == "refunded" {
+                    return Err((StatusCode::CONFLICT, "escrow is already settled or refunded".to_string()));
+                }
+                if record.protocol_status == "disputed" {
+                    return Err((StatusCode::CONFLICT, "escrow is already disputed".to_string()));
+                }
+                record.payment_hash
+            }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
         }
     };
@@ -325,9 +346,9 @@ async fn dispute_escrow<N: HoldNode>(
         [sender_pk.clone(), body.resolver.clone()],
         PayloadBody::Request {
             quote: id.clone(),
-            private_terms: "arbitrator-share".to_string(),
+            private_terms: ARBITRATOR_SHARE_TERMS.to_string(),
             payment_hash: Some(payment_hash),
-            name: Some("s3".to_string()),
+            name: Some(ARBITRATOR_SHARE_NAME.to_string()),
         },
     )
     .map_err(bad_request)?;
@@ -653,6 +674,7 @@ mod tests {
             payment_hash,
             lightning::types::payment::PaymentSecret([8u8; 32]),
             1000,
+            lightning_invoice::Currency::Regtest,
         )
         .unwrap()
         .to_string();

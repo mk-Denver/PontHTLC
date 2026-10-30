@@ -8,12 +8,12 @@ use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder};
 
 pub fn build_hold_invoice(
     keys_manager: &KeysManager, payment_hash: [u8; 32], payment_secret: PaymentSecret,
-    amount_msat: u64,
+    amount_msat: u64, currency: Currency,
 ) -> Result<Bolt11Invoice, String> {
     let secp_ctx = Secp256k1::signing_only();
     let node_secret_key = keys_manager.get_node_secret_key();
     let payment_hash_sha256 = bitcoin::hashes::sha256::Hash::from_byte_array(payment_hash);
-    InvoiceBuilder::new(Currency::Regtest)
+    InvoiceBuilder::new(currency)
         .amount_milli_satoshis(amount_msat)
         .description("PontHTLC hold invoice".to_string())
         .payment_hash(payment_hash_sha256)
@@ -47,6 +47,7 @@ mod tests {
             payment_hash,
             PaymentSecret([9u8; 32]),
             50_000_000,
+            Currency::Regtest,
         )
         .unwrap();
         let text = invoice.to_string();

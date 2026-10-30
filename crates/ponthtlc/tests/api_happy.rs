@@ -11,7 +11,7 @@ use ponthtlc::tenancy::EscrowStore;
 
 fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_json::Value) {
     let header = format!("x-nostr-pubkey: {owner}");
-    let mut command = std::process::Command::new("curl.exe");
+    let mut command = std::process::Command::new("curl");
     command.args([
         "-sS",
         "-X",
@@ -27,7 +27,7 @@ fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_js
         command.args(["-d", body]);
     }
     command.arg(url);
-    let output = command.output().expect("curl.exe");
+    let output = command.output().expect("curl not found");
     let text = String::from_utf8(output.stdout).expect("curl output");
     let (payload, code) = text.rsplit_once('\n').unwrap_or((text.as_str(), "0"));
     let status = code.trim().parse().unwrap_or(0);
