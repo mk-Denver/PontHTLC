@@ -86,7 +86,13 @@ fn parse_config() -> DaemonConfig {
             .get("bitcoind-port")
             .map(|value| value.parse().expect("--bitcoind-port"))
             .unwrap_or(18923),
-        rpc_user: args.get("rpc-user").cloned().unwrap_or_else(|| "ponthtlc".to_string()),
-        rpc_pass: args.get("rpc-pass").cloned().unwrap_or_else(|| "ponthtlc".to_string()),
+        rpc_user: args.get("rpc-user").cloned().unwrap_or_else(|| {
+            eprintln!("warning: using default rpc-user 'ponthtlc'; pass --rpc-user to override");
+            "ponthtlc".to_string()
+        }),
+        rpc_pass: args.get("rpc-pass").cloned().unwrap_or_else(|| {
+            eprintln!("warning: using default rpc-pass; pass --rpc-pass to override");
+            "ponthtlc".to_string()
+        }),
     }
 }
