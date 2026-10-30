@@ -2,15 +2,42 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::{to_bytes, Body};
-use axum::http::Request;
 use bitcoin::hashes::Hash;
 use lightning::events::{Event, PaymentPurpose};
 use ponthtlc::bitcoind::BitcoindFacade;
 use ponthtlc::http::{router, AppState};
 use ponthtlc::node::{build_node, EventSink};
 use ponthtlc::tenancy::EscrowStore;
-use tower::ServiceExt;
+
+fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_json::Value) {
+    let header = format!("x-nostr-pubkey: {owner}");
+    let mut command = std::process::Command::new("curl.exe");
+    command.args([
+        "-sS",
+        "-X",
+        method,
+        "-H",
+        "content-type: application/json",
+        "-H",
+        &header,
+        "-w",
+        "\n%{http_code}",
+    ]);
+    if !body.is_empty() {
+        command.args(["-d", body]);
+    }
+    command.arg(url);
+    let output = command.output().expect("curl.exe");
+    let text = String::from_utf8(output.stdout).expect("curl output");
+    let (payload, code) = text.rsplit_once('\n').unwrap_or((text.as_str(), "0"));
+    let status = code.trim().parse().unwrap_or(0);
+    let value = if payload.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()))
+    };
+    (status, value)
+}
 
 async fn wait_for_event<F>(sink: &EventSink, mut predicate: F, timeout_secs: u64) -> Option<Event>
 where
@@ -33,38 +60,8 @@ where
     }
 }
 
-fn json_request(method: &str, uri: &str, owner: &str, body: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-nostr-pubkey", owner)
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
 fn pubkey(seed: u8) -> String {
     hex::encode([seed; 32])
-}
-
-async fn post_json(
-    application: &axum::Router, method: &str, uri: &str, owner: &str, body: &str,
-) -> (axum::http::StatusCode, serde_json::Value) {
-    let response = application
-        .clone()
-        .oneshot(json_request(method, uri, owner, body))
-        .await
-        .expect("http request");
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("body");
-    let value = if bytes.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::String(
-            String::from_utf8_lossy(&bytes).to_string(),
-        ))
-    };
-    (status, value)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -125,42 +122,46 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     let buyer_app = router(Arc::new(AppState {
         node: Arc::clone(&buyer),
         store: Mutex::new(EscrowStore::open(buyer_dir.join("escrows.json")).unwrap()),
+        nostr_secret: [1u8; 32],
     }));
     let seller_app = router(Arc::new(AppState {
         node: Arc::clone(&seller),
         store: Mutex::new(EscrowStore::open(seller_dir.join("escrows.json")).unwrap()),
+        nostr_secret: [2u8; 32],
     }));
+    let buyer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let seller_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let buyer_url = format!("http://{}", buyer_listener.local_addr().unwrap());
+    let seller_url = format!("http://{}", seller_listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(buyer_listener, buyer_app).await.unwrap() });
+    tokio::spawn(async move { axum::serve(seller_listener, seller_app).await.unwrap() });
 
     let mut preimage = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut preimage);
     let payment_hash = bitcoin::hashes::sha256::Hash::hash(&preimage).to_byte_array();
     let buyer_owner = pubkey(0x11);
     let seller_owner = pubkey(0x22);
-    let (status, created) = post_json(
-        &buyer_app,
+    let (status, created) = curl_json(
         "POST",
-        "/api/escrow/create",
+        &format!("{buyer_url}/api/escrow/create"),
         &buyer_owner,
         &format!(
             "{{\"payment_hash\":\"{}\",\"amount_msat\":50000000}}",
             hex::encode(payment_hash)
         ),
-    )
-    .await;
+    );
     let invoice = created["bolt11_invoice"].as_str().unwrap().to_string();
     let id = created["id"].as_str().unwrap().to_string();
     assert!(!invoice.is_empty());
-    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    assert_eq!(status, 200, "{created}");
 
-    let (status, paid) = post_json(
-        &seller_app,
+    let (status, paid) = curl_json(
         "POST",
-        "/api/invoice/pay",
+        &format!("{seller_url}/api/escrow/{id}/fund"),
         &seller_owner,
         &format!("{{\"bolt11\":\"{invoice}\"}}"),
-    )
-    .await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{paid}");
+    );
+    assert_eq!(status, 200, "{paid}");
 
     let claimable = wait_for_event(
         &buyer.events,
@@ -179,19 +180,69 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         other => panic!("unexpected event: {other:?}"),
     }
 
-    let (status, claimed) = post_json(
-        &buyer_app,
+    let (status, claimed) = curl_json(
         "POST",
-        &format!("/api/escrow/{id}/claim"),
+        &format!("{buyer_url}/api/escrow/{id}/claim"),
         &buyer_owner,
         &format!("{{\"preimage\":\"{}\"}}", hex::encode(preimage)),
-    )
-    .await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{claimed}");
+    );
+    assert_eq!(status, 200, "{claimed}");
 
     wait_for_event(&seller.events, |event| matches!(event, Event::PaymentSent { .. }), 30)
         .await
         .expect("seller never saw PaymentSent");
+
+    let (status, settled) = curl_json(
+        "GET",
+        &format!("{buyer_url}/api/escrow/{id}"),
+        &buyer_owner,
+        "",
+    );
+    assert_eq!(status, 200, "{settled}");
+    assert_eq!(settled["protocol_status"].as_str().unwrap(), "settled");
+
+    let mut fail_preimage = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut fail_preimage);
+    let fail_hash = bitcoin::hashes::sha256::Hash::hash(&fail_preimage).to_byte_array();
+    let (status, failed_invoice) = curl_json(
+        "POST",
+        &format!("{buyer_url}/api/escrow/create"),
+        &buyer_owner,
+        &format!(
+            "{{\"payment_hash\":\"{}\",\"amount_msat\":10000000}}",
+            hex::encode(fail_hash)
+        ),
+    );
+    assert_eq!(status, 200, "{failed_invoice}");
+    let fail_bolt11 = failed_invoice["bolt11_invoice"].as_str().unwrap();
+    let fail_id = failed_invoice["id"].as_str().unwrap();
+    let (status, funded_fail) = curl_json(
+        "POST",
+        &format!("{seller_url}/api/escrow/{fail_id}/fund"),
+        &seller_owner,
+        &format!("{{\"bolt11\":\"{fail_bolt11}\"}}"),
+    );
+    assert_eq!(status, 200, "{funded_fail}");
+    wait_for_event(
+        &buyer.events,
+        |event| match event {
+            Event::PaymentClaimable { payment_hash, .. } => payment_hash.0 == fail_hash,
+            _ => false,
+        },
+        30,
+    )
+    .await
+    .expect("second PaymentClaimable");
+    let (status, failed) = curl_json(
+        "POST",
+        &format!("{buyer_url}/api/escrow/{fail_id}/fail"),
+        &buyer_owner,
+        "",
+    );
+    assert_eq!(status, 200, "{failed}");
+    wait_for_event(&seller.events, |event| matches!(event, Event::PaymentFailed { .. }), 30)
+        .await
+        .expect("seller never saw PaymentFailed");
 
     assert_daemon_files_omit_preimage(&buyer_dir, &preimage);
     assert_daemon_files_omit_preimage(&seller_dir, &preimage);
