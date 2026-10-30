@@ -1,5 +1,3 @@
-mod bitcoind_proxy;
-mod node;
 mod shamir;
 
 use std::collections::HashMap;
@@ -8,14 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::hashes::Hash;
-use lightning::events::{Event, EventsProvider, PaymentPurpose};
+use lightning::events::{Event, PaymentPurpose};
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
+use ponthtlc::bitcoind::BitcoindFacade;
+use ponthtlc::node::{build_node, EventSink, Node};
 use rand::RngCore;
-
-use crate::bitcoind_proxy::BitcoindFacade;
-use crate::node::{build_node, EventSink, Node};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scenario {
@@ -83,77 +80,6 @@ where
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn start_event_pump(node: &Arc<Node>) {
-    let sink = Arc::clone(&node.events);
-    let channel_manager = Arc::clone(&node.channel_manager);
-    let chain_monitor = Arc::clone(&node.chain_monitor);
-    let peer_manager = Arc::clone(&node.peer_manager);
-    let bitcoind = Arc::clone(&node.bitcoind);
-    let node_name = node.name.to_string();
-    tokio::spawn(async move {
-        loop {
-            let handler = {
-                let sink = Arc::clone(&sink);
-                let channel_manager = Arc::clone(&channel_manager);
-                let bitcoind = Arc::clone(&bitcoind);
-                let node_name = node_name.clone();
-                move |event: Event| {
-                    let sink = Arc::clone(&sink);
-                    let channel_manager = Arc::clone(&channel_manager);
-                    let bitcoind = Arc::clone(&bitcoind);
-                    let node_name = node_name.clone();
-                    async move {
-                        println!("[{}] EVENT: {:?}", node_name, event);
-                        if let Event::FundingGenerationReady {
-                            temporary_channel_id, counterparty_node_id, channel_value_satoshis, output_script, ..
-                        } = &event
-                        {
-                            match bitcoind
-                                .create_funding_transaction(output_script, *channel_value_satoshis)
-                                .await
-                            {
-                                Ok(funding_tx) => {
-                                    if let Err(e) = channel_manager.funding_transaction_generated(
-                                        *temporary_channel_id,
-                                        *counterparty_node_id,
-                                        funding_tx,
-                                    ) {
-                                        println!(
-                                            "[{}] SPIKE_NOTE: funding_transaction_generated rejected: {:?}",
-                                            node_name, e
-                                        );
-                                    }
-                                },
-                                Err(e) => println!(
-                                    "[{}] SPIKE_NOTE: failed to create funding transaction: {}",
-                                    node_name, e
-                                ),
-                            }
-                        }
-                        sink.lock().expect("event sink mutex poisoned").push(event);
-                        Ok(())
-                    }
-                }
-            };
-            channel_manager.process_pending_events_async(handler).await;
-            channel_manager.process_pending_htlc_forwards();
-            peer_manager.process_events();
-
-            let monitor_handler = {
-                let node_name = node_name.clone();
-                let sink = Arc::clone(&sink);
-                move |event: Event| {
-                    println!("[{}] MONITOR EVENT: {:?}", node_name, event);
-                    sink.lock().expect("event sink mutex poisoned").push(event);
-                    Ok(())
-                }
-            };
-            chain_monitor.process_pending_events(&monitor_handler);
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    });
 }
 
 async fn connect_peers(seller: &Arc<Node>, buyer: &Arc<Node>) -> Result<(), String> {
@@ -260,9 +186,9 @@ async fn run_happy(
 
     buyer.channel_manager.claim_funds(reconstructed);
 
-    let claimed = wait_for_event(&buyer.events, |e| matches!(e, Event::PaymentClaimed { .. }), 30)
+    let _claimed = wait_for_event(&buyer.events, |e| matches!(e, Event::PaymentClaimed { .. }), 30)
         .ok_or_else(|| "buyer never saw PaymentClaimed".to_string())?;
-    println!("SPIKE_INFO: {:?}", claimed);
+    println!("SPIKE_INFO: buyer claimed payment");
 
     let sent = wait_for_event(&seller.events, |e| matches!(e, Event::PaymentSent { .. }), 30)
         .ok_or_else(|| "seller never saw PaymentSent".to_string())?;
@@ -278,10 +204,7 @@ async fn run_happy(
         if *payment_preimage == preimage {
             println!("SPIKE_PASS: 4b-release-claim: seller auto-recovers the preimage from the claim");
         } else {
-            return Err(format!(
-                "PaymentSent preimage mismatch: got {:?} want {:?}",
-                payment_preimage, preimage
-            ));
+            return Err("PaymentSent preimage mismatch".to_string());
         }
     }
     Ok(())
@@ -291,9 +214,9 @@ async fn run_fail(
     seller: &Arc<Node>, buyer: &Arc<Node>, registered_hash: PaymentHash,
 ) -> Result<(), String> {
     buyer.channel_manager.fail_htlc_backwards(&registered_hash);
-    let failed = wait_for_event(&seller.events, |e| matches!(e, Event::PaymentFailed { .. }), 30)
+    let _failed = wait_for_event(&seller.events, |e| matches!(e, Event::PaymentFailed { .. }), 30)
         .ok_or_else(|| "seller never saw PaymentFailed after backward fail".to_string())?;
-    println!("SPIKE_INFO: {:?}", failed);
+    println!("SPIKE_INFO: seller saw PaymentFailed");
     println!("SPIKE_PASS: 4c-manual-fail: payment failed backwards, seller gets refund semantics");
     Ok(())
 }
@@ -314,8 +237,8 @@ async fn run_hold(
     let failed =
         wait_for_event(&seller.events, |e| matches!(e, Event::PaymentFailed { .. }), 20);
     match failed {
-        Some(event) => {
-            println!("SPIKE_INFO: {:?}", event);
+        Some(_event) => {
+            println!("SPIKE_INFO: seller saw PaymentFailed");
             println!("SPIKE_PASS: 4d-hold-expiry: automatic expiry fired past claim_deadline (your LDK semantics observed)");
         },
         None => {
@@ -352,9 +275,6 @@ async fn run_scenario(cfg: SpikeConfig) -> Result<(), String> {
 
     let seller = build_node("seller", seller_dir, 9800, Arc::clone(&bitcoind)).await;
     let buyer = build_node("buyer", buyer_dir, 9801, Arc::clone(&bitcoind)).await;
-
-    start_event_pump(&seller);
-    start_event_pump(&buyer);
 
     connect_peers(&seller, &buyer).await?;
     println!("SPIKE_PASS: 0-connect: peers connected");

@@ -2,6 +2,7 @@
 /.cargo
 **/target
 spike-data/
+test-data/
 *.log
 .DS_Store
 Thumbs.db

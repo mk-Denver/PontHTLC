@@ -8,6 +8,7 @@ use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
 use lightning_block_sync::{AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource};
 use serde_json::{json, Value};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
@@ -23,6 +24,10 @@ impl BitcoindFacade {
         let credentials = B64.encode(format!("{}:{}", rpc_user, rpc_password));
         let rpc = Arc::new(RpcClient::new(&credentials, http_endpoint));
         BitcoindFacade { rpc, runtime: Handle::current() }
+    }
+
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
     }
 
     pub async fn wait_for_bitcoind(&self, timeout_secs: u64) -> Result<(), String> {
@@ -133,7 +138,7 @@ impl BlockSource for BitcoindFacade {
         Box::pin(async move { self.rpc.get_block(header_hash).await })
     }
 
-    fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
+    fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<'a, (BlockHash, Option<u32>)> {
         Box::pin(async move { self.rpc.get_best_block().await })
     }
 }
