@@ -140,7 +140,7 @@ cargo test -p ponthtlc-nostr --test relay_integration  # NIP-59 round-trip via s
 | [ROADMAP.md](ROADMAP.md) | Project roadmap (spike → MVP → post-MVP) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding agents |
-| [LICENSE.md](LICENSE.md) | License (CC0-1.0) |
+| [LICENSE](LICENSE) | License (MIT) |
 
 ## Status
 
