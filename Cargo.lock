@@ -755,6 +755,9 @@ dependencies = [
  "lightning-net-tokio",
  "lightning-persister",
  "lightning-rapid-gossip-sync",
+ "ponthtlc-escrow",
+ "ponthtlc-nostr",
+ "ponthtlc-protocol",
  "rand",
  "serde",
  "serde_json",
@@ -768,7 +771,6 @@ version = "0.1.0"
 dependencies = [
  "bitcoin",
  "lightning",
- "ponthtlc",
  "ponthtlc-protocol",
  "rand",
 ]
