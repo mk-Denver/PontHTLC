@@ -1,6 +1,9 @@
 # PontHTLC
 
-Non-custodial HTLC-based Bitcoin/Lightning escrow for P2P disputed trades.
+> Built for [Dakar Bitcoin Hack 2026](https://dakar-bitcoin-hack-2026.devpost.com/)
+
+Non-custodial HTLC-based Bitcoin/Lightning escrow for P2P disputed trades,
+designed for the African context where 10,000-sat trades must be economical.
 
 Built on the [Pontmore protocol](https://github.com/pontmore/protocol)
 [`pontmore/swap@1`](https://github.com/pontmore/protocol/blob/main/profiles/swap-v1.md)
@@ -11,6 +14,24 @@ profile, with a 2-of-3 Shamir split preimage extension and Nostr
 service provider runs `ponthtlc` and users interact via browser + Nostr.
 Non-custodiality is preserved because the preimage is reconstructed
 client-side. See [docs/infrastructure.md](docs/infrastructure.md).
+
+## Why this matters for Africa
+
+P2P Bitcoin trading is dominant across Africa (WhatsApp groups, Telegram,
+in-person cash trades), but existing tools are either:
+
+- **Custodial** (the platform holds your keys — trust risk)
+- **Manual** (no escrow — counterparty risk on every trade)
+- **Expensive** (requiring each trader to run their own Lightning node)
+
+PontHTLC solves this with a **non-custodial escrow** that works for
+small trades:
+
+- **No node to run**: a hosted LDK node handles channels; users use a browser
+- **No trust required**: the preimage is split 2-of-3 Shamir; no single party
+  (including the host) can reconstruct it alone
+- **Dispute resolution**: an arbitrator (Nostr-only) holds the tiebreaker share
+- **Low cost**: $0 for users; the operator's VPS serves hundreds of traders
 
 ## Setup
 
