@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 ponthtlc-protocol = { path = "../ponthtlc-protocol" }
-ponthtlc = { path = "../ponthtlc" }
 lightning = "0.2.0"
 bitcoin = "0.32"
 rand = "0.8"
