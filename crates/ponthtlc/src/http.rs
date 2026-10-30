@@ -12,6 +12,10 @@ use axum::{Json, Router};
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
+use ponthtlc_escrow::{EscrowNode, LdkBridge};
+use ponthtlc_nostr::nip59::wrap_payload;
+use ponthtlc_nostr::payloads::PayloadBody;
+use ponthtlc_protocol::event::{pubkey_from_secret, NostrEvent};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -25,7 +29,7 @@ const NOSTR_PUBKEY_HEADER: &str = "x-nostr-pubkey";
 
 pub trait HoldNode: Send + Sync {
     fn register_hold(&self, payment_hash: [u8; 32], amount_msat: u64) -> Result<String, String>;
-    fn claim(&self, preimage: [u8; 32]) -> Result<(), String>;
+    fn claim(&self, preimage: [u8; 32], payment_hash: [u8; 32]) -> Result<(), String>;
     fn fail(&self, payment_hash: [u8; 32]) -> Result<(), String>;
     fn pay(&self, bolt11: &str) -> Result<[u8; 32], String>;
     fn subscribe(&self) -> broadcast::Receiver<WireEvent>;
@@ -34,12 +38,35 @@ pub trait HoldNode: Send + Sync {
     fn block_height(&self) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>;
 }
 
+struct HostedNode(Arc<Node>);
+
+impl EscrowNode for HostedNode {
+    fn register_hold(
+        &self,
+        payment_hash: PaymentHash,
+        amount_msat: u64,
+    ) -> Result<lightning::types::payment::PaymentSecret, String> {
+        self.0
+            .channel_manager
+            .create_inbound_payment_for_hash(payment_hash, Some(amount_msat), 3600, None)
+            .map_err(|err| format!("create_inbound_payment_for_hash failed: {:?}", err))
+    }
+
+    fn claim(&self, preimage: PaymentPreimage) -> Result<(), String> {
+        self.0.channel_manager.claim_funds(preimage);
+        Ok(())
+    }
+
+    fn fail_htlc(&self, payment_hash: PaymentHash) -> Result<(), String> {
+        self.0.channel_manager.fail_htlc_backwards(&payment_hash);
+        Ok(())
+    }
+}
+
 impl HoldNode for Arc<Node> {
     fn register_hold(&self, payment_hash: [u8; 32], amount_msat: u64) -> Result<String, String> {
-        let payment_secret = self
-            .channel_manager
-            .create_inbound_payment_for_hash(PaymentHash(payment_hash), Some(amount_msat), 3600, None)
-            .map_err(|err| format!("create_inbound_payment_for_hash failed: {:?}", err))?;
+        let payment_secret =
+            LdkBridge::new(HostedNode(Arc::clone(self))).secure(&PaymentHash(payment_hash), amount_msat)?;
         let invoice = invoice::build_hold_invoice(
             &self.keys_manager,
             payment_hash,
@@ -49,14 +76,13 @@ impl HoldNode for Arc<Node> {
         Ok(invoice.to_string())
     }
 
-    fn claim(&self, preimage: [u8; 32]) -> Result<(), String> {
-        self.channel_manager.claim_funds(PaymentPreimage(preimage));
-        Ok(())
+    fn claim(&self, preimage: [u8; 32], payment_hash: [u8; 32]) -> Result<(), String> {
+        LdkBridge::new(HostedNode(Arc::clone(self)))
+            .settle(PaymentPreimage(preimage), &PaymentHash(payment_hash))
     }
 
     fn fail(&self, payment_hash: [u8; 32]) -> Result<(), String> {
-        self.channel_manager.fail_htlc_backwards(&PaymentHash(payment_hash));
-        Ok(())
+        LdkBridge::new(HostedNode(Arc::clone(self))).refund(&PaymentHash(payment_hash))
     }
 
     fn pay(&self, bolt11: &str) -> Result<[u8; 32], String> {
@@ -100,6 +126,7 @@ impl HoldNode for Arc<Node> {
 pub struct AppState<N: HoldNode> {
     pub node: N,
     pub store: Mutex<EscrowStore>,
+    pub nostr_secret: [u8; 32],
 }
 
 pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
@@ -109,6 +136,7 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrows", get(list_escrows::<N>))
         .route("/api/escrow/:id", get(get_escrow::<N>))
         .route("/api/escrow/:id/claim", post(claim_escrow::<N>))
+        .route("/api/escrow/:id/fund", post(fund_escrow::<N>))
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
         .route("/api/invoice/pay", post(pay_invoice::<N>))
@@ -161,6 +189,7 @@ async fn create_escrow<N: HoldNode>(
             payment_hash: payment_hash_hex.clone(),
             state: "open".to_string(),
             bolt11: bolt11_invoice.clone(),
+            protocol_status: "secured".to_string(),
         })
         .map_err(bad_request)?;
     Ok(Json(CreateResponse { id, payment_hash: payment_hash_hex, bolt11_invoice }))
@@ -213,6 +242,33 @@ async fn pay_invoice<N: HoldNode>(
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
 }
 
+async fn fund_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<PayRequest>,
+) -> Result<Json<PayResponse>, (StatusCode, String)> {
+    let payer = owner_from_headers(&headers)?;
+    let owns_invoice = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        store.get_owned(&id, &payer).is_some()
+            || store.list(&payer).iter().any(|record| record.bolt11 == body.bolt11)
+    };
+    if owns_invoice {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "the invoice creator cannot fund it".to_string(),
+        ));
+    }
+    let payment_hash = state.node.pay(&body.bolt11).map_err(bad_request)?;
+    let payment_hash_hex = hex::encode(payment_hash);
+    state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .record_outgoing(&payer, &payment_hash_hex)
+        .map_err(bad_request)?;
+    Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
+}
+
 async fn fail_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -234,20 +290,54 @@ async fn fail_escrow<N: HoldNode>(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisputeRequest {
+    resolver: String,
+}
+
+#[derive(Serialize)]
+struct DisputeResponse {
+    gift_wraps: Vec<NostrEvent>,
+}
+
 async fn dispute_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+    Json(body): Json<DisputeRequest>,
+) -> Result<Json<DisputeResponse>, (StatusCode, String)> {
     let owner = owner_from_headers(&headers)?;
-    let found = state
+    if body.resolver.len() != 64 || !body.resolver.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "resolver must be 64 hex characters".to_string()));
+    }
+    let payment_hash = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get_owned(&id, &owner) {
+            Some(record) => record.payment_hash,
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    };
+    let sender_pk = pubkey_from_secret(&state.nostr_secret);
+    let wraps = wrap_payload(
+        &state.nostr_secret,
+        &sender_pk,
+        &body.resolver,
+        &id,
+        [sender_pk.clone(), body.resolver.clone()],
+        PayloadBody::Request {
+            quote: id.clone(),
+            private_terms: "arbitrator-share".to_string(),
+            payment_hash: Some(payment_hash),
+            name: Some("s3".to_string()),
+        },
+    )
+    .map_err(bad_request)?;
+    state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
-        .get_owned(&id, &owner)
-        .is_some();
-    if !found {
-        return Err((StatusCode::NOT_FOUND, "escrow not found".to_string()));
-    }
-    Err((StatusCode::NOT_IMPLEMENTED, "dispute is not available".to_string()))
+        .mark_disputed(&id, &owner)
+        .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    Ok(Json(DisputeResponse { gift_wraps: wraps }))
 }
 
 #[derive(Serialize)]
@@ -288,7 +378,8 @@ async fn claim_escrow<N: HoldNode>(
     if computed != stored_hash {
         return Err((StatusCode::BAD_REQUEST, "preimage does not match payment_hash".to_string()));
     }
-    state.node.claim(preimage).map_err(bad_request)?;
+    let payment_hash = decode_fixed_hex(&stored_hash, "payment_hash")?;
+    state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     state
         .store
         .lock()
@@ -315,14 +406,14 @@ async fn stream_events<N: HoldNode>(
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         };
-        let Some(payment_hash) = event.payment_hash.clone() else {
-            continue;
+        let visible = event.kind == "ChannelReady" || match event.payment_hash.as_deref() {
+            Some(payment_hash) => state
+                .store
+                .lock()
+                .expect("escrow store mutex poisoned")
+                .visible_hash(&owner, payment_hash),
+            None => false,
         };
-        let visible = state
-            .store
-            .lock()
-            .expect("escrow store mutex poisoned")
-            .visible_hash(&owner, &payment_hash);
         if !visible {
             continue;
         }
@@ -389,7 +480,7 @@ mod tests {
             Ok(format!("lnbcrt1{}", hex::encode(payment_hash)))
         }
 
-        fn claim(&self, preimage: [u8; 32]) -> Result<(), String> {
+        fn claim(&self, preimage: [u8; 32], _payment_hash: [u8; 32]) -> Result<(), String> {
             self.claims.lock().expect("claims mutex poisoned").push(preimage);
             Ok(())
         }
@@ -435,6 +526,7 @@ mod tests {
                 tx,
             },
             store: Mutex::new(EscrowStore::open(dir.join("escrows.json")).unwrap()),
+            nostr_secret: [9u8; 32],
         });
         (router(state), fails)
     }
@@ -633,7 +725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispute_is_not_implemented() {
+    async fn dispute_requests_the_arbitrator_share_without_a_preimage() {
         let dir = std::env::temp_dir().join("ponthtlc-http-dispute");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -650,11 +742,32 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
         let id = created_json["id"].as_str().unwrap();
+        let resolver = "ab".repeat(32);
         let disputed = application
-            .oneshot(json_request("POST", &format!("/api/escrow/{id}/dispute"), &owner, "{}"))
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/escrow/{id}/dispute"),
+                &owner,
+                &format!("{{\"resolver\":\"{resolver}\"}}"),
+            ))
             .await
             .unwrap();
-        assert_eq!(disputed.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(disputed.status(), StatusCode::OK);
+        let body = to_bytes(disputed.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["gift_wraps"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["gift_wraps"][0]["kind"].as_u64().unwrap(), 1059);
+        assert!(!text.contains(&"ee".repeat(32)));
+        let listed = application
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &owner, ""))
+            .await
+            .unwrap();
+        let listed_body = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let listed_text = String::from_utf8(listed_body.to_vec()).unwrap();
+        assert!(listed_text.contains("\"protocol_status\":\"disputed\""));
+        assert!(!listed_text.contains(&"ee".repeat(32)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
