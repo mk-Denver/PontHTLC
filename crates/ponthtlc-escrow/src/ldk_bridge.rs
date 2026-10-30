@@ -1,11 +1,7 @@
-use std::sync::Arc;
-
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use ponthtlc_protocol::swap_v1::SwapStatus;
-
-use ponthtlc::node::Node;
 
 pub trait EscrowNode: Send + Sync {
     fn register_hold(
@@ -15,28 +11,6 @@ pub trait EscrowNode: Send + Sync {
     ) -> Result<PaymentSecret, String>;
     fn claim(&self, preimage: PaymentPreimage) -> Result<(), String>;
     fn fail_htlc(&self, payment_hash: PaymentHash) -> Result<(), String>;
-}
-
-impl EscrowNode for Arc<Node> {
-    fn register_hold(
-        &self,
-        payment_hash: PaymentHash,
-        amount_msat: u64,
-    ) -> Result<PaymentSecret, String> {
-        self.channel_manager
-            .create_inbound_payment_for_hash(payment_hash, Some(amount_msat), 3600, None)
-            .map_err(|e| format!("create_inbound_payment_for_hash failed: {:?}", e))
-    }
-
-    fn claim(&self, preimage: PaymentPreimage) -> Result<(), String> {
-        self.channel_manager.claim_funds(preimage);
-        Ok(())
-    }
-
-    fn fail_htlc(&self, payment_hash: PaymentHash) -> Result<(), String> {
-        self.channel_manager.fail_htlc_backwards(&payment_hash);
-        Ok(())
-    }
 }
 
 pub struct LdkBridge<N: EscrowNode> {

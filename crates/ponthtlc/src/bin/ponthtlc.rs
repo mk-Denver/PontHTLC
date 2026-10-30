@@ -34,7 +34,8 @@ async fn main() {
             std::process::exit(1);
         },
     };
-    let state = Arc::new(AppState { node, store: Mutex::new(store) });
+    let nostr_secret = load_or_create_nostr_secret(&data_dir);
+    let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret });
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -94,5 +95,26 @@ fn parse_config() -> DaemonConfig {
             eprintln!("warning: using default rpc-pass; pass --rpc-pass to override");
             "ponthtlc".to_string()
         }),
+    }
+}
+
+fn load_or_create_nostr_secret(data_dir: &std::path::Path) -> [u8; 32] {
+    let path = data_dir.join("nostr_seed");
+    match std::fs::read(&path) {
+        Ok(existing) if existing.len() == 32 => {
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&existing);
+            seed
+        },
+        Ok(existing) => panic!("nostr seed file corrupted (len={}), refusing to overwrite", existing.len()),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use rand::RngCore;
+            let mut seed = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut seed);
+            let _ = std::fs::create_dir_all(data_dir);
+            let _ = std::fs::write(&path, &seed);
+            seed
+        },
+        Err(e) => panic!("failed to read nostr seed: {e}"),
     }
 }

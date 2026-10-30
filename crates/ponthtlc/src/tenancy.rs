@@ -10,6 +10,10 @@ pub struct EscrowRecord {
     pub owner: String,
     pub payment_hash: String,
     pub state: String,
+    #[serde(default)]
+    pub bolt11: String,
+    #[serde(default)]
+    pub protocol_status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,11 +23,20 @@ struct ChannelAssignment {
     channel_id: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OutgoingPayment {
+    payer: String,
+    payment_hash: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct DiskState {
     escrows: Vec<EscrowRecord>,
     channels: Vec<ChannelAssignment>,
+    #[serde(default)]
+    outgoing: Vec<OutgoingPayment>,
 }
 
 pub struct EscrowStore {
@@ -63,6 +76,35 @@ impl EscrowStore {
         self.state.escrows.iter().find(|record| record.id == id).cloned()
     }
 
+    pub fn get_owned(&self, id: &str, owner: &str) -> Option<EscrowRecord> {
+        self.state
+            .escrows
+            .iter()
+            .find(|record| record.id == id && record.owner == owner)
+            .cloned()
+    }
+
+    pub fn visible_hash(&self, owner: &str, payment_hash: &str) -> bool {
+        self.state.escrows.iter().any(|record| {
+            record.owner == owner && record.payment_hash == payment_hash
+        }) || self.state.outgoing.iter().any(|payment| {
+            payment.payer == owner && payment.payment_hash == payment_hash
+        })
+    }
+
+    pub fn record_outgoing(&mut self, payer: &str, payment_hash: &str) -> Result<(), String> {
+        if self.state.outgoing.iter().any(|payment| {
+            payment.payer == payer && payment.payment_hash == payment_hash
+        }) {
+            return Ok(());
+        }
+        self.state.outgoing.push(OutgoingPayment {
+            payer: payer.to_string(),
+            payment_hash: payment_hash.to_string(),
+        });
+        self.persist()
+    }
+
     pub fn assign_channel(&mut self, owner: &str, channel_id: &str) -> Result<(), String> {
         if self.state.channels.iter().any(|channel| channel.channel_id == channel_id) {
             return Err("channel already assigned".to_string());
@@ -91,6 +133,30 @@ impl EscrowStore {
             .find(|record| record.id == id && record.owner == owner)
             .ok_or_else(|| "escrow not found".to_string())?;
         record.state = "claim_submitted".to_string();
+        record.protocol_status = "settled".to_string();
+        self.persist()
+    }
+
+    pub fn mark_fail_submitted(&mut self, id: &str, owner: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id && record.owner == owner)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.state = "fail_submitted".to_string();
+        record.protocol_status = "refunded".to_string();
+        self.persist()
+    }
+
+    pub fn mark_disputed(&mut self, id: &str, owner: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id && record.owner == owner)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.protocol_status = "disputed".to_string();
         self.persist()
     }
 
@@ -149,6 +215,8 @@ mod tests {
                 owner: "owner-a".to_string(),
                 payment_hash: "aa".to_string(),
                 state: "open".to_string(),
+                bolt11: String::new(),
+                protocol_status: String::new(),
             })
             .unwrap();
         store
@@ -157,6 +225,8 @@ mod tests {
                 owner: "owner-b".to_string(),
                 payment_hash: "bb".to_string(),
                 state: "open".to_string(),
+                bolt11: String::new(),
+                protocol_status: String::new(),
             })
             .unwrap();
         store.assign_channel("owner-a", "chan-a").unwrap();
@@ -173,6 +243,32 @@ mod tests {
         store.mark_claim_submitted("escrow-a", "owner-a").unwrap();
         assert!(!tree_contains_secret(&dir, &preimage_hex, &preimage));
         assert_eq!(store.get("escrow-a").unwrap().state, "claim_submitted");
+        store.record_outgoing("owner-a", "cc").unwrap();
+        assert!(store.visible_hash("owner-a", "cc"));
+        assert!(!store.visible_hash("owner-b", "cc"));
+        store.mark_fail_submitted("escrow-b", "owner-b").unwrap();
+        assert_eq!(store.get_owned("escrow-b", "owner-b").unwrap().state, "fail_submitted");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_escrow_file_loads_without_bolt11() {
+        let dir = std::env::temp_dir().join(format!(
+            "ponthtlc-tenancy-legacy-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("escrows.json");
+        fs::write(
+            &path,
+            r#"{"escrows":[{"id":"escrow-old","owner":"owner-a","payment_hash":"aa","state":"open"}],"channels":[]}"#,
+        )
+        .unwrap();
+        let store = EscrowStore::open(path).unwrap();
+        let record = store.get_owned("escrow-old", "owner-a").unwrap();
+        assert_eq!(record.bolt11, "");
+        assert_eq!(record.state, "open");
         let _ = fs::remove_dir_all(&dir);
     }
 }
