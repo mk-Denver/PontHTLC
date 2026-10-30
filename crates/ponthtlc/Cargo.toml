@@ -20,6 +20,9 @@ serde_json = "1"
 base64 = "0.22"
 hex = "0.4"
 axum = { version = "0.7", features = ["ws"] }
+ponthtlc-escrow = { path = "../ponthtlc-escrow" }
+ponthtlc-nostr = { path = "../ponthtlc-nostr" }
+ponthtlc-protocol = { path = "../ponthtlc-protocol" }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
