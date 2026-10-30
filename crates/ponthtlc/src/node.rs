@@ -531,13 +531,17 @@ fn load_or_create_seed(data_dir: &Path) -> [u8; 32] {
             seed_bytes.copy_from_slice(&existing_seed);
             seed_bytes
         },
-        _ => {
+        Ok(existing) => {
+            panic!("seed file corrupted (len={}), refusing to overwrite", existing.len());
+        },
+        Err(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
             let mut seed_bytes = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut seed_bytes);
             let _ = std::fs::create_dir_all(data_dir);
             let _ = std::fs::write(&seed_path, &seed_bytes);
             seed_bytes
         },
+        Err(err) => panic!("failed to read seed: {}", err),
     }
 }
 
@@ -555,7 +559,10 @@ fn read_peers(data_dir: &Path) -> Vec<PeerRecord> {
 
 fn write_peers(data_dir: &Path, peers: &[PeerRecord]) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(peers).map_err(|err| err.to_string())?;
-    std::fs::write(peers_path(data_dir), bytes).map_err(|err| err.to_string())
+    let path = peers_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|err| err.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|err| err.to_string())
 }
 
 fn reconnect_saved_peers(data_dir: &Path, peer_manager: Arc<PeerManagerT>) {
@@ -597,8 +604,14 @@ fn start_listening(
                     }
                 }
                 accepted = listener.accept() => {
+                    let tcp_stream = match accepted {
+                        Ok(stream) => stream.0,
+                        Err(err) => {
+                            eprintln!("accept failed: {err}");
+                            continue;
+                        },
+                    };
                     let peer_manager = Arc::clone(&peer_manager);
-                    let tcp_stream = accepted.expect("accept failed").0;
                     tokio::spawn(async move {
                         lightning_net_tokio::setup_inbound(
                             peer_manager,
@@ -630,7 +643,10 @@ fn start_chain_sync(
                     }
                 }
                 polled = spv_client.poll_best_tip() => {
-                    polled.expect("chain poll failed");
+                    if let Err(err) = polled {
+                        eprintln!("chain poll failed: {err:?}; will retry");
+                        continue;
+                    }
                 }
             }
             if *shutdown.borrow() {
