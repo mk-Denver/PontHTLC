@@ -77,10 +77,13 @@ impl EventHandler for NodeEventHandler {
                         );
                     }
                 },
-                Err(e) => println!(
-                    "[{}] SPIKE_NOTE: failed to create funding transaction: {}",
-                    self.name, e
-                ),
+                Err(e) => {
+                    println!(
+                        "[{}] SPIKE_NOTE: failed to create funding transaction: {}",
+                        self.name, e
+                    );
+                    return Err(ReplayEvent());
+                },
             }
         }
         let _ = self.broadcast.send(wire);
