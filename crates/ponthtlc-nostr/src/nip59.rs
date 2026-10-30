@@ -28,11 +28,12 @@ pub fn wrap_payload(
     let signed_rumor = rumor.sign(sender_sk)?;
 
     let rumor_json = serde_json::to_string(&signed_rumor).map_err(|e| format!("serialize rumor: {e}"))?;
-    let encrypted_to_recipient = nip04::encrypt(sender_sk, recipient_pk, rumor_json.as_bytes())?;
-    let encrypted_to_sender = nip04::encrypt(sender_sk, sender_pk, rumor_json.as_bytes())?;
 
     let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
     let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
+
+    let encrypted_to_recipient = nip04::encrypt(&wrap_sk1, recipient_pk, rumor_json.as_bytes())?;
+    let encrypted_to_sender = nip04::encrypt(&wrap_sk2, sender_pk, rumor_json.as_bytes())?;
 
     let wrap_for_recipient = UnsignedEvent {
         pubkey: wrap_pk1,
@@ -76,11 +77,11 @@ pub fn wrap_chat(
     let signed_rumor = rumor.sign(sender_sk)?;
     let rumor_json = serde_json::to_string(&signed_rumor).map_err(|e| format!("serialize rumor: {e}"))?;
 
-    let encrypted_to_recipient = nip04::encrypt(sender_sk, recipient_pk, rumor_json.as_bytes())?;
-    let encrypted_to_sender = nip04::encrypt(sender_sk, sender_pk, rumor_json.as_bytes())?;
-
     let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
     let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
+
+    let encrypted_to_recipient = nip04::encrypt(&wrap_sk1, recipient_pk, rumor_json.as_bytes())?;
+    let encrypted_to_sender = nip04::encrypt(&wrap_sk2, sender_pk, rumor_json.as_bytes())?;
 
     let wrap1 = UnsignedEvent {
         pubkey: wrap_pk1,

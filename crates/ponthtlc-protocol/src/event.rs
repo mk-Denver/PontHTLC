@@ -53,14 +53,23 @@ impl UnsignedEvent {
         let secret =
             secp256k1::SecretKey::from_slice(secret_key).map_err(|e| format!("bad secret key: {e}"))?;
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret);
-        let id = self.id();
-        let msg = secp256k1::Message::from_slice(&id).map_err(|e| format!("bad message: {e}"))?;
+        let (x_only, _) = keypair.x_only_public_key();
+        let pubkey = hex::encode(x_only.serialize());
+        let id = canonical_json(
+            &pubkey,
+            self.created_at,
+            self.kind,
+            &self.tags,
+            &self.content,
+        );
+        let id_bytes = Sha256::hash(id.as_bytes()).to_byte_array();
+        let msg = secp256k1::Message::from_slice(&id_bytes).map_err(|e| format!("bad message: {e}"))?;
         let mut aux = [0u8; 32];
         OsRng.fill_bytes(&mut aux);
         let sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, &aux);
         Ok(NostrEvent {
-            id: hex::encode(id),
-            pubkey: self.pubkey,
+            id: hex::encode(id_bytes),
+            pubkey,
             created_at: self.created_at,
             kind: self.kind,
             tags: self.tags,
