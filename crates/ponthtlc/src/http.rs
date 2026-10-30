@@ -277,12 +277,16 @@ async fn claim_escrow<N: HoldNode>(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let owner = owner_from_headers(&headers)?;
     let preimage = decode_fixed_hex(&body.preimage, "preimage")?;
-    {
+    let stored_hash = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
         match store.get(&id) {
-            Some(record) if record.owner == owner => {},
+            Some(record) if record.owner == owner => record.payment_hash,
             _ => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
         }
+    };
+    let computed = sha256_hex(&preimage);
+    if computed != stored_hash {
+        return Err((StatusCode::BAD_REQUEST, "preimage does not match payment_hash".to_string()));
     }
     state.node.claim(preimage).map_err(bad_request)?;
     state
@@ -354,6 +358,11 @@ fn decode_fixed_hex(value: &str, field: &str) -> Result<[u8; 32], (StatusCode, S
 
 fn bad_request(message: String) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, message)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use bitcoin::hashes::Hash;
+    hex::encode(bitcoin::hashes::sha256::Hash::hash(bytes).to_byte_array())
 }
 
 fn new_id() -> String {
@@ -510,8 +519,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let application = app(&dir);
         let owner = pubkey(0x11);
-        let payment_hash = "33".repeat(32);
         let preimage = "ee".repeat(32);
+        let raw = hex::decode(&preimage).unwrap();
+        let payment_hash = sha256_hex(&raw);
         let created = application
             .clone()
             .oneshot(json_request("POST", "/api/escrow/create", &owner, &format!(
@@ -532,7 +542,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed.status(), StatusCode::OK);
-        let raw = hex::decode(&preimage).unwrap();
         assert!(!crate::tenancy::tree_contains_secret(&dir, &preimage, &raw));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -673,6 +682,46 @@ mod tests {
         let channels_body = to_bytes(channels.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(channels_body.to_vec()).unwrap();
         assert!(text.contains("channel-1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_preimage_that_does_not_match_hash() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-claim-mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let owner = pubkey(0x22);
+        let payment_hash = "33".repeat(32);
+        let created = application
+            .clone()
+            .oneshot(json_request("POST", "/api/escrow/create", &owner, &format!(
+                "{{\"payment_hash\":\"{payment_hash}\",\"amount_msat\":1000}}"
+            )))
+            .await
+            .unwrap();
+        let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let id = created_json["id"].as_str().unwrap();
+        let claimed = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/escrow/{id}/claim"),
+                &owner,
+                "{\"preimage\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::BAD_REQUEST);
+        let listed = application
+            .oneshot(json_request("GET", "/api/escrows", &owner, ""))
+            .await
+            .unwrap();
+        let body = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("\"state\":\"open\""));
+        assert!(!text.contains("claim_submitted"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

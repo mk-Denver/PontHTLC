@@ -96,6 +96,7 @@ async fn restart_restores_channel_ids() {
     let seller_ids = channel_ids(&seller);
     let buyer_ids = channel_ids(&buyer);
     assert!(!seller_ids.is_empty(), "seller opened no channels");
+    assert!(!buyer_ids.is_empty(), "buyer did not see channel");
 
     let seller_dir: PathBuf = seller_dir;
     let buyer_dir: PathBuf = buyer_dir;
