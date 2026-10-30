@@ -1,8 +1,10 @@
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use rand::RngCore;
-use secp256k1::ecdh::SharedSecret;
+use secp256k1::ecdh::shared_secret_point;
 use secp256k1::{PublicKey, SecretKey};
 
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
@@ -18,18 +20,22 @@ fn xonly_to_compressed(xonly_bytes: &[u8]) -> Result<[u8; 33], String> {
     Ok(compressed)
 }
 
+fn derive_key(peer_pk_hex: &str, our_sk: &[u8; 32]) -> Result<[u8; 32], String> {
+    let secret = SecretKey::from_slice(our_sk).map_err(|e| format!("bad secret: {e}"))?;
+    let peer_bytes = hex::decode(peer_pk_hex).map_err(|e| format!("bad pubkey hex: {e}"))?;
+    let compressed = xonly_to_compressed(&peer_bytes)?;
+    let peer_pk = PublicKey::from_slice(&compressed).map_err(|e| format!("bad pubkey: {e}"))?;
+    let xy = shared_secret_point(&peer_pk, &secret);
+    let key = Sha256::hash(&xy[..32]).to_byte_array();
+    Ok(key)
+}
+
 pub fn encrypt(
     sender_sk: &[u8; 32],
     recipient_pk_hex: &str,
     plaintext: &[u8],
 ) -> Result<String, String> {
-    let secret = SecretKey::from_slice(sender_sk).map_err(|e| format!("bad secret: {e}"))?;
-    let recipient_pk_bytes = hex::decode(recipient_pk_hex).map_err(|e| format!("bad pubkey hex: {e}"))?;
-    let compressed = xonly_to_compressed(&recipient_pk_bytes)?;
-    let recipient_pk = PublicKey::from_slice(&compressed).map_err(|e| format!("bad pubkey: {e}"))?;
-
-    let shared = SharedSecret::new(&recipient_pk, &secret);
-    let key: [u8; 32] = shared.secret_bytes();
+    let key = derive_key(recipient_pk_hex, sender_sk)?;
 
     let mut iv = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut iv);
@@ -50,13 +56,7 @@ pub fn decrypt(
     sender_pk_hex: &str,
     encrypted: &str,
 ) -> Result<Vec<u8>, String> {
-    let secret = SecretKey::from_slice(recipient_sk).map_err(|e| format!("bad secret: {e}"))?;
-    let sender_pk_bytes = hex::decode(sender_pk_hex).map_err(|e| format!("bad pubkey hex: {e}"))?;
-    let compressed = xonly_to_compressed(&sender_pk_bytes)?;
-    let sender_pk = PublicKey::from_slice(&compressed).map_err(|e| format!("bad pubkey: {e}"))?;
-
-    let shared = SharedSecret::new(&sender_pk, &secret);
-    let key: [u8; 32] = shared.secret_bytes();
+    let key = derive_key(sender_pk_hex, recipient_sk)?;
 
     let (text_b64, iv_b64) = encrypted
         .split_once("?iv=")

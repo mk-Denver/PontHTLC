@@ -47,6 +47,11 @@ pub enum PayloadBody {
     },
     #[serde(rename = "fiat_sent")]
     FiatSent { reference: String },
+    #[serde(rename = "share")]
+    Share {
+        x: u8,
+        bytes: String,
+    },
     #[serde(rename = "release")]
     Release { preimage: String },
     #[serde(rename = "claimed")]
@@ -94,6 +99,7 @@ impl SwapPayload {
             PayloadBody::Invoice { .. } => "invoice",
             PayloadBody::Locked { .. } => "locked",
             PayloadBody::FiatSent { .. } => "fiat_sent",
+            PayloadBody::Share { .. } => "share",
             PayloadBody::Release { .. } => "release",
             PayloadBody::Claimed { .. } => "claimed",
             PayloadBody::PayoutInvoice { .. } => "payout_invoice",

@@ -72,7 +72,7 @@ impl<N: crate::ldk_bridge::EscrowNode> EscrowMachine<N> {
         if self.last_status != SwapStatus::SettlementAuthorized {
             return Err("settlement not authorized".to_string());
         }
-        self.bridge.settle(preimage)?;
+        self.bridge.settle(preimage, &self.payment_hash)?;
         self.last_status = SwapStatus::Settled;
         Ok(())
     }

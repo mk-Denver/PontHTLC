@@ -8,6 +8,7 @@ pub const KIND_ROOT: u32 = 7300;
 pub const KIND_ACTION: u32 = 7301;
 pub const KIND_OFFER: u32 = 38383;
 pub const KIND_GIFT_WRAP: u32 = 1059;
+pub const KIND_SEAL: u32 = 13;
 pub const KIND_CHAT: u32 = 14;
 pub const KIND_SWAP_PAYLOAD: u32 = 7310;
 

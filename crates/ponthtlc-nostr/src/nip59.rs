@@ -1,8 +1,60 @@
-use ponthtlc_protocol::constants::{KIND_GIFT_WRAP, SWAP_PROFILE};
+use ponthtlc_protocol::constants::{KIND_GIFT_WRAP, KIND_SEAL, SWAP_PROFILE};
 use ponthtlc_protocol::event::{is_hex64, NostrEvent, UnsignedEvent};
 
 use crate::nip04;
 use crate::payloads::{InboxItem, InboxKind, SwapPayload};
+
+fn build_seal(
+    sender_sk: &[u8; 32],
+    sender_pk: &str,
+    recipient_pk: &str,
+    rumor_json: &str,
+) -> Result<NostrEvent, String> {
+    let encrypted = nip04::encrypt(sender_sk, recipient_pk, rumor_json.as_bytes())?;
+    let seal = UnsignedEvent {
+        pubkey: sender_pk.to_string(),
+        created_at: ponthtlc_protocol::event::now(),
+        kind: KIND_SEAL,
+        tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
+        content: encrypted,
+    };
+    seal.sign(sender_sk)
+}
+
+fn open_seal(
+    seal: &NostrEvent,
+    recipient_sk: &[u8; 32],
+) -> Option<NostrEvent> {
+    if seal.kind != KIND_SEAL {
+        return None;
+    }
+    if !seal.verify() {
+        return None;
+    }
+    let decrypted = nip04::decrypt(recipient_sk, &seal.pubkey, &seal.content).ok()?;
+    let rumor: NostrEvent = serde_json::from_slice(&decrypted).ok()?;
+    if !rumor.verify() {
+        return None;
+    }
+    Some(rumor)
+}
+
+fn wrap_seal(
+    seal: &NostrEvent,
+    recipient_pk: &str,
+) -> Result<NostrEvent, String> {
+    let seal_json = serde_json::to_string(seal).map_err(|e| format!("serialize seal: {e}"))?;
+    let (wrap_sk, wrap_pk) = ponthtlc_protocol::event::generate_keypair();
+    let encrypted = nip04::encrypt(&wrap_sk, recipient_pk, seal_json.as_bytes())?;
+    let wrap = UnsignedEvent {
+        pubkey: wrap_pk,
+        created_at: ponthtlc_protocol::event::now(),
+        kind: KIND_GIFT_WRAP,
+        tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
+        content: encrypted,
+    };
+    wrap.sign(&wrap_sk)
+}
 
 pub fn wrap_payload(
     sender_sk: &[u8; 32],
@@ -26,32 +78,13 @@ pub fn wrap_payload(
         content: payload_json,
     };
     let signed_rumor = rumor.sign(sender_sk)?;
-
     let rumor_json = serde_json::to_string(&signed_rumor).map_err(|e| format!("serialize rumor: {e}"))?;
 
-    let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
-    let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
+    let seal_to_recipient = build_seal(sender_sk, sender_pk, recipient_pk, &rumor_json)?;
+    let seal_to_sender = build_seal(sender_sk, sender_pk, sender_pk, &rumor_json)?;
 
-    let encrypted_to_recipient = nip04::encrypt(&wrap_sk1, recipient_pk, rumor_json.as_bytes())?;
-    let encrypted_to_sender = nip04::encrypt(&wrap_sk2, sender_pk, rumor_json.as_bytes())?;
-
-    let wrap_for_recipient = UnsignedEvent {
-        pubkey: wrap_pk1,
-        created_at: ponthtlc_protocol::event::now(),
-        kind: KIND_GIFT_WRAP,
-        tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
-        content: encrypted_to_recipient,
-    };
-    let wrap_for_sender = UnsignedEvent {
-        pubkey: wrap_pk2,
-        created_at: ponthtlc_protocol::event::now(),
-        kind: KIND_GIFT_WRAP,
-        tags: vec![vec!["p".to_string(), sender_pk.to_string()]],
-        content: encrypted_to_sender,
-    };
-
-    let wrap1 = wrap_for_recipient.sign(&wrap_sk1)?;
-    let wrap2 = wrap_for_sender.sign(&wrap_sk2)?;
+    let wrap1 = wrap_seal(&seal_to_recipient, recipient_pk)?;
+    let wrap2 = wrap_seal(&seal_to_sender, sender_pk)?;
 
     Ok(vec![wrap1, wrap2])
 }
@@ -77,29 +110,11 @@ pub fn wrap_chat(
     let signed_rumor = rumor.sign(sender_sk)?;
     let rumor_json = serde_json::to_string(&signed_rumor).map_err(|e| format!("serialize rumor: {e}"))?;
 
-    let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
-    let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
+    let seal_to_recipient = build_seal(sender_sk, sender_pk, recipient_pk, &rumor_json)?;
+    let seal_to_sender = build_seal(sender_sk, sender_pk, sender_pk, &rumor_json)?;
 
-    let encrypted_to_recipient = nip04::encrypt(&wrap_sk1, recipient_pk, rumor_json.as_bytes())?;
-    let encrypted_to_sender = nip04::encrypt(&wrap_sk2, sender_pk, rumor_json.as_bytes())?;
-
-    let wrap1 = UnsignedEvent {
-        pubkey: wrap_pk1,
-        created_at: ponthtlc_protocol::event::now(),
-        kind: KIND_GIFT_WRAP,
-        tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
-        content: encrypted_to_recipient,
-    }
-    .sign(&wrap_sk1)?;
-
-    let wrap2 = UnsignedEvent {
-        pubkey: wrap_pk2,
-        created_at: ponthtlc_protocol::event::now(),
-        kind: KIND_GIFT_WRAP,
-        tags: vec![vec!["p".to_string(), sender_pk.to_string()]],
-        content: encrypted_to_sender,
-    }
-    .sign(&wrap_sk2)?;
+    let wrap1 = wrap_seal(&seal_to_recipient, recipient_pk)?;
+    let wrap2 = wrap_seal(&seal_to_sender, sender_pk)?;
 
     Ok(vec![wrap1, wrap2])
 }
@@ -125,12 +140,10 @@ pub fn open_wrap(wrap: &NostrEvent, recipient_sk: &[u8; 32]) -> Option<InboxItem
         return None;
     }
 
-    let decrypted = nip04::decrypt(recipient_sk, &wrap.pubkey, &wrap.content).ok()?;
-    let rumor: NostrEvent = serde_json::from_slice(&decrypted).ok()?;
+    let seal_decrypted = nip04::decrypt(recipient_sk, &wrap.pubkey, &wrap.content).ok()?;
+    let seal: NostrEvent = serde_json::from_slice(&seal_decrypted).ok()?;
 
-    if !rumor.verify() {
-        return None;
-    }
+    let rumor = open_seal(&seal, recipient_sk)?;
 
     let e_tags: Vec<&[String]> = rumor.tags_by_name("e").into_iter().collect();
     if e_tags.len() != 1 {

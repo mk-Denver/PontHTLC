@@ -1,21 +1,30 @@
 use std::sync::Arc;
 
-use lightning::types::payment::{PaymentHash, PaymentPreimage};
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use ponthtlc_protocol::swap_v1::SwapStatus;
 
 use ponthtlc::node::Node;
 
 pub trait EscrowNode: Send + Sync {
-    fn register_hold(&self, payment_hash: PaymentHash, amount_msat: u64) -> Result<(), String>;
+    fn register_hold(
+        &self,
+        payment_hash: PaymentHash,
+        amount_msat: u64,
+    ) -> Result<PaymentSecret, String>;
     fn claim(&self, preimage: PaymentPreimage) -> Result<(), String>;
     fn fail_htlc(&self, payment_hash: PaymentHash) -> Result<(), String>;
 }
 
 impl EscrowNode for Arc<Node> {
-    fn register_hold(&self, payment_hash: PaymentHash, amount_msat: u64) -> Result<(), String> {
+    fn register_hold(
+        &self,
+        payment_hash: PaymentHash,
+        amount_msat: u64,
+    ) -> Result<PaymentSecret, String> {
         self.channel_manager
             .create_inbound_payment_for_hash(payment_hash, Some(amount_msat), 3600, None)
-            .map(|_| ())
             .map_err(|e| format!("create_inbound_payment_for_hash failed: {:?}", e))
     }
 
@@ -39,11 +48,23 @@ impl<N: EscrowNode> LdkBridge<N> {
         Self { node }
     }
 
-    pub fn secure(&self, payment_hash: &PaymentHash, amount_msat: u64) -> Result<(), String> {
+    pub fn secure(
+        &self,
+        payment_hash: &PaymentHash,
+        amount_msat: u64,
+    ) -> Result<PaymentSecret, String> {
         self.node.register_hold(*payment_hash, amount_msat)
     }
 
-    pub fn settle(&self, preimage: PaymentPreimage) -> Result<(), String> {
+    pub fn settle(
+        &self,
+        preimage: PaymentPreimage,
+        payment_hash: &PaymentHash,
+    ) -> Result<(), String> {
+        let computed = Sha256::hash(&preimage.0).to_byte_array();
+        if computed != payment_hash.0 {
+            return Err("preimage does not match payment hash".to_string());
+        }
         self.node.claim(preimage)
     }
 
@@ -61,11 +82,12 @@ impl<N: EscrowNode> LdkBridge<N> {
     ) -> Result<(), String> {
         match (prev, next) {
             (SwapStatus::Accepted, SwapStatus::Secured) => {
-                self.secure(payment_hash, amount_msat)
+                self.secure(payment_hash, amount_msat)?;
+                Ok(())
             }
             (SwapStatus::SettlementAuthorized, SwapStatus::Settled) => {
                 let p = preimage.ok_or("preimage required for settlement")?;
-                self.settle(*p)
+                self.settle(*p, payment_hash)
             }
             (SwapStatus::RefundAuthorized, SwapStatus::Refunded) => {
                 self.refund(payment_hash)

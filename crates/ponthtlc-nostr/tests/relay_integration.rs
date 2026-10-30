@@ -68,9 +68,10 @@ async fn nip59_gift_wrap_round_trip() {
     let (recipient_sk, recipient_pk) = generate_keypair();
     let coordination_id = "a".repeat(64);
 
-    let preimage_hex = "ee".repeat(32);
-    let body = PayloadBody::Release {
-        preimage: preimage_hex.clone(),
+    let share_bytes = "ee".repeat(32);
+    let body = PayloadBody::Share {
+        x: 1,
+        bytes: share_bytes.clone(),
     };
 
     let wraps = wrap_payload(
@@ -126,8 +127,9 @@ async fn nip59_gift_wrap_round_trip() {
     assert_eq!(payload.participants, vec![sender_pk, recipient_pk]);
 
     match &payload.body {
-        PayloadBody::Release { preimage } => {
-            assert_eq!(*preimage, preimage_hex);
+        PayloadBody::Share { x, bytes } => {
+            assert_eq!(*x, 1u8);
+            assert_eq!(*bytes, share_bytes);
         }
         _ => panic!("wrong payload body type"),
     }

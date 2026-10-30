@@ -90,19 +90,32 @@ impl NostrEvent {
         let Ok(x_only) = XOnlyPublicKey::from_slice(&pubkey_arr) else {
             return false;
         };
-        let Ok(id_bytes) = hex::decode(&self.id) else {
-            return false;
+        let computed = canonical_json(
+            &self.pubkey,
+            self.created_at,
+            self.kind,
+            &self.tags,
+            &self.content,
+        );
+        let computed_id = Sha256::hash(computed.as_bytes()).to_byte_array();
+        let stored_id = match hex::decode(&self.id) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => return false,
         };
-        let Ok(id_arr) = <[u8; 32]>::try_from(&id_bytes[..]) else {
+        if computed_id != stored_id {
             return false;
-        };
+        }
         let Ok(sig_bytes) = hex::decode(&self.sig) else {
             return false;
         };
         let Ok(sig) = schnorr::Signature::from_slice(&sig_bytes) else {
             return false;
         };
-        let Ok(msg) = secp256k1::Message::from_slice(&id_arr) else {
+        let Ok(msg) = secp256k1::Message::from_slice(&stored_id) else {
             return false;
         };
         let secp = Secp256k1::new();
