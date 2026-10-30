@@ -34,7 +34,8 @@ async fn main() {
             std::process::exit(1);
         },
     };
-    let state = Arc::new(AppState { node, store: Mutex::new(store) });
+    let nostr_secret = node.keys_manager.get_node_secret_key().secret_bytes();
+    let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret });
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
