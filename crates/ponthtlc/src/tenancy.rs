@@ -12,6 +12,8 @@ pub struct EscrowRecord {
     pub state: String,
     #[serde(default)]
     pub bolt11: String,
+    #[serde(default)]
+    pub protocol_status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +133,7 @@ impl EscrowStore {
             .find(|record| record.id == id && record.owner == owner)
             .ok_or_else(|| "escrow not found".to_string())?;
         record.state = "claim_submitted".to_string();
+        record.protocol_status = "settled".to_string();
         self.persist()
     }
 
@@ -142,6 +145,18 @@ impl EscrowStore {
             .find(|record| record.id == id && record.owner == owner)
             .ok_or_else(|| "escrow not found".to_string())?;
         record.state = "fail_submitted".to_string();
+        record.protocol_status = "refunded".to_string();
+        self.persist()
+    }
+
+    pub fn mark_disputed(&mut self, id: &str, owner: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id && record.owner == owner)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.protocol_status = "disputed".to_string();
         self.persist()
     }
 
@@ -201,6 +216,7 @@ mod tests {
                 payment_hash: "aa".to_string(),
                 state: "open".to_string(),
                 bolt11: String::new(),
+                protocol_status: String::new(),
             })
             .unwrap();
         store
@@ -210,6 +226,7 @@ mod tests {
                 payment_hash: "bb".to_string(),
                 state: "open".to_string(),
                 bolt11: String::new(),
+                protocol_status: String::new(),
             })
             .unwrap();
         store.assign_channel("owner-a", "chan-a").unwrap();
