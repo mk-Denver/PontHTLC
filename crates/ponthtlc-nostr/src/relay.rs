@@ -4,29 +4,34 @@ use futures_util::{SinkExt, StreamExt};
 use ponthtlc_protocol::event::NostrEvent;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+
+type WsStream = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct Relay {
     url: String,
-    stream: Arc<Mutex<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>,
+    writer: Arc<Mutex<futures_util::stream::SplitSink<WsStream, Message>>>,
+    reader: Arc<Mutex<futures_util::stream::SplitStream<WsStream>>>,
 }
 
 impl Relay {
     pub async fn connect(url: &str) -> Result<Self, String> {
-        let (ws_stream, _) = connect_async(url)
+        let (ws_stream, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("relay connect failed: {e}"))?;
+        let (writer, reader) = ws_stream.split();
         Ok(Self {
             url: url.to_string(),
-            stream: Arc::new(Mutex::new(ws_stream)),
+            writer: Arc::new(Mutex::new(writer)),
+            reader: Arc::new(Mutex::new(reader)),
         })
     }
 
     pub async fn publish(&self, event: &NostrEvent) -> Result<(), String> {
         let msg = json!(["EVENT", event]);
         let text = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
-        self.stream
+        self.writer
             .lock()
             .await
             .send(Message::Text(text))
@@ -69,7 +74,7 @@ impl Relay {
         }
         let msg = json!(["REQ", subscription_id, filter]);
         let text = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
-        self.stream
+        self.writer
             .lock()
             .await
             .send(Message::Text(text))
@@ -80,7 +85,7 @@ impl Relay {
     pub async fn unsubscribe(&self, subscription_id: &str) -> Result<(), String> {
         let msg = json!(["CLOSE", subscription_id]);
         let text = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
-        self.stream
+        self.writer
             .lock()
             .await
             .send(Message::Text(text))
@@ -88,15 +93,16 @@ impl Relay {
             .map_err(|e| format!("send failed: {e}"))
     }
 
-    pub async fn recv(&self) -> Result<Option<NostrEvent>, String> {
+    pub async fn recv(&self) -> Result<Option<(String, NostrEvent)>, String> {
         loop {
             let msg = {
-                let mut stream = self.stream.lock().await;
-                stream.next().await
+                let mut reader = self.reader.lock().await;
+                reader.next().await
             };
             match msg {
                 Some(Ok(Message::Text(text))) => {
-                    let msg: Value = serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))?;
+                    let msg: Value = serde_json::from_str(&text)
+                        .map_err(|e| format!("parse: {e}"))?;
                     if !msg.is_array() {
                         continue;
                     }
@@ -109,9 +115,13 @@ impl Relay {
                             if arr.len() < 3 {
                                 continue;
                             }
+                            let sub_id = arr[1]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
                             let event: NostrEvent = serde_json::from_value(arr[2].clone())
                                 .map_err(|e| format!("parse event: {e}"))?;
-                            return Ok(Some(event));
+                            return Ok(Some((sub_id, event)));
                         }
                         _ => continue,
                     }

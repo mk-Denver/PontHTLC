@@ -57,9 +57,7 @@ pub fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
 }
 
 pub fn gf_inv(value: u8) -> u8 {
-    if value == 0 {
-        return 0;
-    }
+    assert!(value != 0, "gf_inv: zero has no inverse in GF(256)");
     gf_pow(value, 254)
 }
 

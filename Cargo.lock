@@ -767,13 +767,10 @@ name = "ponthtlc-escrow"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
- "hex",
  "lightning",
  "ponthtlc",
  "ponthtlc-protocol",
  "rand",
- "serde",
- "serde_json",
 ]
 
 [[package]]

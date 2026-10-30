@@ -201,10 +201,6 @@ fn is_positive_decimal(s: &str) -> bool {
         && s.parse::<f64>().map(|v| v > 0.0).unwrap_or(false)
 }
 
-fn is_positive_integer(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) && !s.starts_with('0')
-}
-
 fn is_valid_ts(v: &serde_json::Value) -> Option<u64> {
     v.as_u64().filter(|t| *t > 0)
 }
@@ -348,7 +344,7 @@ pub fn parse_root(event: &NostrEvent, verify: bool) -> Result<SwapRoot, Protocol
     let customer = one_role("swap/customer")?;
     let escrow = one_role("core/escrow")?;
     let resolver = one_role("core/resolver")?;
-    let mut all = vec![&agent, &customer, &escrow, &resolver];
+    let all = vec![&agent, &customer, &escrow, &resolver];
     let unique: HashSet<&String> = all.iter().copied().collect();
     if unique.len() != all.len() {
         return Err(ProtocolError::new(
@@ -948,6 +944,7 @@ pub fn reconstruct(
         if valid.len() > 1 {
             state.forked = true;
             state.fork_ids = valid.iter().map(|(a, _)| a.event.id.clone()).collect();
+            state.fork_ids.sort();
             break;
         }
         let (a, next) = valid.into_iter().next().unwrap();

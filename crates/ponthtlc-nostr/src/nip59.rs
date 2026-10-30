@@ -1,4 +1,4 @@
-use ponthtlc_protocol::constants::KIND_GIFT_WRAP;
+use ponthtlc_protocol::constants::{KIND_GIFT_WRAP, SWAP_PROFILE};
 use ponthtlc_protocol::event::{is_hex64, NostrEvent, UnsignedEvent};
 
 use crate::nip04;
@@ -31,24 +31,25 @@ pub fn wrap_payload(
     let encrypted_to_recipient = nip04::encrypt(sender_sk, recipient_pk, rumor_json.as_bytes())?;
     let encrypted_to_sender = nip04::encrypt(sender_sk, sender_pk, rumor_json.as_bytes())?;
 
+    let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
+    let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
+
     let wrap_for_recipient = UnsignedEvent {
-        pubkey: String::new(),
+        pubkey: wrap_pk1,
         created_at: ponthtlc_protocol::event::now(),
         kind: KIND_GIFT_WRAP,
         tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
         content: encrypted_to_recipient,
     };
     let wrap_for_sender = UnsignedEvent {
-        pubkey: String::new(),
+        pubkey: wrap_pk2,
         created_at: ponthtlc_protocol::event::now(),
         kind: KIND_GIFT_WRAP,
         tags: vec![vec!["p".to_string(), sender_pk.to_string()]],
         content: encrypted_to_sender,
     };
 
-    let (wrap_sk, wrap_pk) = ponthtlc_protocol::event::generate_keypair();
-    let wrap1 = wrap_for_recipient.sign(&wrap_sk)?;
-    let (wrap_sk2, _) = ponthtlc_protocol::event::generate_keypair();
+    let wrap1 = wrap_for_recipient.sign(&wrap_sk1)?;
     let wrap2 = wrap_for_sender.sign(&wrap_sk2)?;
 
     Ok(vec![wrap1, wrap2])
@@ -78,20 +79,20 @@ pub fn wrap_chat(
     let encrypted_to_recipient = nip04::encrypt(sender_sk, recipient_pk, rumor_json.as_bytes())?;
     let encrypted_to_sender = nip04::encrypt(sender_sk, sender_pk, rumor_json.as_bytes())?;
 
-    let (wrap_sk, _) = ponthtlc_protocol::event::generate_keypair();
-    let (wrap_sk2, _) = ponthtlc_protocol::event::generate_keypair();
+    let (wrap_sk1, wrap_pk1) = ponthtlc_protocol::event::generate_keypair();
+    let (wrap_sk2, wrap_pk2) = ponthtlc_protocol::event::generate_keypair();
 
     let wrap1 = UnsignedEvent {
-        pubkey: String::new(),
+        pubkey: wrap_pk1,
         created_at: ponthtlc_protocol::event::now(),
         kind: KIND_GIFT_WRAP,
         tags: vec![vec!["p".to_string(), recipient_pk.to_string()]],
         content: encrypted_to_recipient,
     }
-    .sign(&wrap_sk)?;
+    .sign(&wrap_sk1)?;
 
     let wrap2 = UnsignedEvent {
-        pubkey: String::new(),
+        pubkey: wrap_pk2,
         created_at: ponthtlc_protocol::event::now(),
         kind: KIND_GIFT_WRAP,
         tags: vec![vec!["p".to_string(), sender_pk.to_string()]],
@@ -115,6 +116,11 @@ pub fn open_wrap(wrap: &NostrEvent, recipient_sk: &[u8; 32]) -> Option<InboxItem
     }
     let to = p_tags[0].get(1)?;
     if !is_hex64(to) {
+        return None;
+    }
+
+    let our_pk = ponthtlc_protocol::event::pubkey_from_secret(recipient_sk);
+    if to != &our_pk {
         return None;
     }
 
@@ -180,5 +186,3 @@ pub fn open_wrap(wrap: &NostrEvent, recipient_sk: &[u8; 32]) -> Option<InboxItem
         ..base
     })
 }
-
-use ponthtlc_protocol::constants::SWAP_PROFILE;

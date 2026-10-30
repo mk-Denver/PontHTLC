@@ -93,7 +93,9 @@ impl NostrEvent {
         let Ok(sig) = schnorr::Signature::from_slice(&sig_bytes) else {
             return false;
         };
-        let msg = secp256k1::Message::from_slice(&id_arr).unwrap();
+        let Ok(msg) = secp256k1::Message::from_slice(&id_arr) else {
+            return false;
+        };
         let secp = Secp256k1::new();
         secp.verify_schnorr(&sig, &msg, &x_only).is_ok()
     }
@@ -150,6 +152,14 @@ pub fn generate_keypair() -> ([u8; 32], String) {
     secret_bytes.copy_from_slice(&secret.secret_bytes()[..]);
     let pk_serialized: [u8; 32] = x_only.serialize();
     (secret_bytes, hex::encode(pk_serialized))
+}
+
+pub fn pubkey_from_secret(secret: &[u8; 32]) -> String {
+    let secp = Secp256k1::new();
+    let secret_key = secp256k1::SecretKey::from_slice(secret).expect("valid secret key");
+    let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let (x_only, _) = keypair.x_only_public_key();
+    hex::encode(x_only.serialize())
 }
 
 pub fn is_hex64(s: &str) -> bool {

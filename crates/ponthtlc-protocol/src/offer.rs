@@ -140,7 +140,11 @@ pub fn parse_offer(event: &NostrEvent, verify: bool) -> Result<Offer, String> {
     let escrow = escrow_a
         .and_then(|t| t.get(1))
         .ok_or("Missing escrow reference")?;
-    if !escrow.starts_with("30361:") || !escrow.contains(':') {
+    let escrow_parts: Vec<&str> = escrow.splitn(3, ':').collect();
+    if escrow_parts.len() != 3
+        || escrow_parts[0] != "30361"
+        || !is_hex64(escrow_parts[1])
+    {
         return Err("Bad escrow".to_string());
     }
 
@@ -256,12 +260,16 @@ pub fn serialize_offer(event: &NostrEvent) -> String {
 fn is_positive_decimal(s: &str) -> bool {
     !s.is_empty()
         && s.chars().all(|c| c.is_ascii_digit() || c == '.')
-        && s.parse::<f64>().map(|v| v > 0.0).unwrap_or(false)
+        && s.parse::<u64>().map(|v| v > 0).unwrap_or_else(|_| s.parse::<f64>().map(|v| v > 0.0).unwrap_or(false))
 }
 
 fn compare_decimal(a: &str, b: &str) -> i32 {
-    let av: f64 = a.parse().unwrap_or(0.0);
-    let bv: f64 = b.parse().unwrap_or(0.0);
+    let av: u64 = a.parse().unwrap_or_else(|_| {
+        a.parse::<f64>().unwrap_or(0.0) as u64
+    });
+    let bv: u64 = b.parse().unwrap_or_else(|_| {
+        b.parse::<f64>().unwrap_or(0.0) as u64
+    });
     if av < bv {
         -1
     } else if av > bv {
@@ -279,14 +287,13 @@ fn is_valid_channel_id(s: &str) -> bool {
 }
 
 fn sats_for_fiat(fiat_amount: &str, price: &str) -> Option<u64> {
-    let fiat: f64 = fiat_amount.parse().ok()?;
-    let price: f64 = price.parse().ok()?;
-    if price <= 0.0 {
+    let fiat: u64 = fiat_amount.parse().ok()?;
+    let price: u64 = price.parse().ok()?;
+    if price == 0 {
         return None;
     }
-    let btc = fiat / price;
-    let sats = (btc * 100_000_000.0).round() as u64;
-    Some(sats)
+    let sats = ((fiat as u128) * 100_000_000 + (price as u128) / 2) / (price as u128);
+    Some(sats as u64)
 }
 
 pub fn check_root_against_offer(
