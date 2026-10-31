@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue, Method, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
+use axum::extract::Request;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use lightning::ln::channelmanager::{PaymentId, Retry};
@@ -147,6 +150,35 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/node/channels", get(node_channels::<N>))
         .route("/api/ws", get(ws_events::<N>))
         .with_state(state)
+        .layer(middleware::from_fn(allow_browser))
+}
+
+async fn allow_browser(req: Request, next: Next) -> Response {
+    let origin = req.headers().get(header::ORIGIN).cloned();
+    if req.method() == Method::OPTIONS {
+        let mut res = Response::new(axum::body::Body::empty());
+        *res.status_mut() = StatusCode::NO_CONTENT;
+        apply_cors(res.headers_mut(), origin.as_ref());
+        return res;
+    }
+    let mut res = next.run(req).await;
+    apply_cors(res.headers_mut(), origin.as_ref());
+    res
+}
+
+fn apply_cors(headers: &mut HeaderMap, origin: Option<&HeaderValue>) {
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        origin.cloned().unwrap_or_else(|| HeaderValue::from_static("*")),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type, x-nostr-pubkey"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
 }
 
 async fn health() -> &'static str {
@@ -410,10 +442,19 @@ async fn claim_escrow<N: HoldNode>(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+struct WsQuery {
+    pubkey: Option<String>,
+}
+
 async fn ws_events<N: HoldNode + 'static>(
-    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, upgrade: WebSocketUpgrade,
+    State(state): State<Arc<AppState<N>>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+    upgrade: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let owner = owner_from_headers(&headers)?;
+    // Browsers cannot set X-Nostr-Pubkey on WebSocket; the query string is the client path.
+    let owner = owner_from_headers_or_query(&headers, query.pubkey.as_deref())?;
     Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, owner)))
 }
 
@@ -445,6 +486,13 @@ async fn stream_events<N: HoldNode>(
     }
 }
 
+fn validate_pubkey(owner: &str) -> Result<String, (StatusCode, String)> {
+    if owner.len() != 64 || !owner.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "X-Nostr-Pubkey must be 64 hex characters".to_string()));
+    }
+    Ok(owner.to_ascii_lowercase())
+}
+
 fn owner_from_headers(headers: &HeaderMap) -> Result<String, (StatusCode, String)> {
     let value = headers
         .get(NOSTR_PUBKEY_HEADER)
@@ -452,10 +500,17 @@ fn owner_from_headers(headers: &HeaderMap) -> Result<String, (StatusCode, String
     let owner = value
         .to_str()
         .map_err(|_| (StatusCode::BAD_REQUEST, "X-Nostr-Pubkey is not ascii".to_string()))?;
-    if owner.len() != 64 || !owner.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err((StatusCode::BAD_REQUEST, "X-Nostr-Pubkey must be 64 hex characters".to_string()));
+    validate_pubkey(owner)
+}
+
+fn owner_from_headers_or_query(
+    headers: &HeaderMap,
+    query_pubkey: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
+    if let Some(pk) = query_pubkey.filter(|value| !value.is_empty()) {
+        return validate_pubkey(pk);
     }
-    Ok(owner.to_ascii_lowercase())
+    owner_from_headers(headers)
 }
 
 fn decode_fixed_hex(value: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)> {
@@ -554,6 +609,37 @@ mod tests {
 
     fn pubkey(seed: u8) -> String {
         hex::encode([seed; 32])
+    }
+
+    #[test]
+    fn websocket_accepts_pubkey_query_without_header() {
+        let headers = HeaderMap::new();
+        let owner = owner_from_headers_or_query(&headers, Some(&pubkey(0xab))).unwrap();
+        assert_eq!(owner, pubkey(0xab));
+        assert!(owner_from_headers(&headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn health_allows_browser_origin() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-cors");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let response = app(&dir)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin").unwrap(),
+            "http://localhost:5173"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

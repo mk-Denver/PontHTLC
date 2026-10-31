@@ -71,23 +71,26 @@ pub fn eval_poly(coeffs: &[u8; 2], x: u8) -> u8 {
     value
 }
 
-pub fn split_preimage(preimage: &[u8; 32]) -> [Share; 3] {
+pub fn split_preimage_with_slopes(preimage: &[u8; 32], slopes: &[u8; 32]) -> [Share; 3] {
     let share_xs = [SHARE_X_BUYER, SHARE_X_SELLER, SHARE_X_ARBITRATOR];
-    let mut rng = rand::thread_rng();
     let mut shares = [
         Share { x: share_xs[0], bytes: [0u8; 32] },
         Share { x: share_xs[1], bytes: [0u8; 32] },
         Share { x: share_xs[2], bytes: [0u8; 32] },
     ];
     for i in 0..32 {
-        let mut coeffs = [0u8; 2];
-        coeffs[0] = preimage[i];
-        rng.fill(&mut coeffs[1..]);
+        let coeffs = [preimage[i], slopes[i]];
         for (share, share_x) in shares.iter_mut().zip(share_xs.iter()) {
             share.bytes[i] = eval_poly(&coeffs, *share_x);
         }
     }
     shares
+}
+
+pub fn split_preimage(preimage: &[u8; 32]) -> [Share; 3] {
+    let mut slopes = [0u8; 32];
+    rand::thread_rng().fill(&mut slopes);
+    split_preimage_with_slopes(preimage, &slopes)
 }
 
 pub fn reconstruct_and_verify(

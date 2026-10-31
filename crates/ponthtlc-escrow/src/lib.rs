@@ -5,6 +5,6 @@ pub mod shamir;
 pub use ldk_bridge::{EscrowNode, LdkBridge};
 pub use machine::EscrowMachine;
 pub use shamir::{
-    eval_poly, gf_inv, gf_mul, gf_pow, reconstruct_and_verify, split_preimage, Share,
-    SHARE_X_ARBITRATOR, SHARE_X_BUYER, SHARE_X_SELLER,
+    eval_poly, gf_inv, gf_mul, gf_pow, reconstruct_and_verify, split_preimage,
+    split_preimage_with_slopes, Share, SHARE_X_ARBITRATOR, SHARE_X_BUYER, SHARE_X_SELLER,
 };

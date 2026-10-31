@@ -28,7 +28,7 @@ Track via [GitHub issues #1–#5](https://github.com/mk-Denver/PontHTLC/issues).
 | #1 | Hosted HTLC node daemon (multi-tenant, persistent, restart recovery) | open |
 | #2 | Nostr escrow (NIP-59 + `pontmore/swap@1` state machine, client-side preimage) | open |
 | #3 | Backend API (REST + WebSocket, preimage pass-through) | open |
-| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | open |
+| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | in progress |
 | #5 | Docker Compose (4 services: bitcoind, relay, ponthtlc, frontend) | open |
 
 ### MVP definition of done
