@@ -70,8 +70,8 @@ different providers can peer via Lightning network.
 
 ```
 1. Seller originates P, splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
-2. Buyer browser → POST /api/escrow/create → hosted node calls create_inbound_payment_for_hash(H)
-3. Seller browser → POST /api/escrow/:id/fund → hosted node calls pay_for_bolt11_invoice
+2. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
+3. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
 4. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
 5. Seller delivers s1 to buyer via Nostr NIP-59 (encrypted, host sees ciphertext only)
 6. Buyer browser reconstructs P = combine(s1, s2)  [client-side, s2 obtained via Nostr or direct]

@@ -7,6 +7,7 @@
     <h2>Kwame has bitcoin</h2>
     <ol class="tiny" style="padding-left:18px;line-height:1.9">
       <li>Sign up as seller. Open the buyer tab beside you.</li>
+      <li>On Desk, open the internal channel and mine a few blocks.</li>
       <li>New trade: amount, buyer key, optional arb key.</li>
       <li>s1 goes to the buyer. s3 goes to the arb. You keep s2.</li>
       <li>When the hold invoice arrives, fund it.</li>

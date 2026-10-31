@@ -14,7 +14,21 @@ export type WireEvent = {
 
 export type NodeInfo = {
   node_pubkey: string;
+  buyer_pubkey?: string;
+  seller_pubkey?: string;
   block_height: number;
+};
+
+export type ChannelStatus = {
+  peers_connected: boolean;
+  buyer_pubkey: string;
+  seller_pubkey: string;
+  channels: {
+    channel_id: string;
+    ready: boolean;
+    usable: boolean;
+    counterparty: string;
+  }[];
 };
 
 export type CreateResponse = {
@@ -141,6 +155,20 @@ export function nodeInfo(pubkey: string): Promise<NodeInfo> {
 
 export function nodeChannels(pubkey: string): Promise<string[]> {
   return request(pubkey, "/api/node/channels");
+}
+
+export function channelStatus(pubkey: string): Promise<ChannelStatus> {
+  return request(pubkey, "/api/channel/status");
+}
+
+export function openChannel(
+  pubkey: string,
+  capacitySatoshis = 1_000_000,
+): Promise<{ channel_id: string }> {
+  return request(pubkey, "/api/channel/open", {
+    method: "POST",
+    body: JSON.stringify({ capacity_satoshis: capacitySatoshis }),
+  });
 }
 
 export function openEventStream(

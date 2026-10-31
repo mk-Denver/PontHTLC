@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::events::Event;
 use ponthtlc::bitcoind::BitcoindFacade;
+use ponthtlc::dual::DualNode;
 use ponthtlc::node::{build_node, EventSink, Node};
 
 async fn wait_for_event<F>(sink: &EventSink, mut predicate: F, timeout_secs: u64) -> Option<Event>
@@ -112,5 +113,53 @@ async fn restart_restores_channel_ids() {
     assert_eq!(channel_ids(&buyer), buyer_ids);
     seller.shutdown().await;
     buyer.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_restores_dual_node_channel_ids() {
+    let bitcoind = Arc::new(BitcoindFacade::new(
+        "127.0.0.1".to_string(),
+        18923,
+        "ponthtlc".to_string(),
+        "ponthtlc".to_string(),
+    ));
+    bitcoind.wait_for_bitcoind(45).await.expect("bitcoind");
+    bitcoind.ensure_wallet("spike").await.expect("wallet");
+    if bitcoind.get_block_height().await.expect("height") < 105 {
+        bitcoind.generate_blocks(160).await.expect("mine");
+    }
+
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("ponthtlc-dual-restart-{nanos}"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let pair = DualNode::start(root.clone(), 19812, 19813, Arc::clone(&bitcoind))
+        .await
+        .expect("dual node");
+    let channel_id = pair.open_internal_channel(1_000_000).await.expect("open");
+    bitcoind.generate_blocks(12).await.expect("confirm");
+    pair.seller
+        .wait_for_event(|event| matches!(event, Event::ChannelReady { .. }), 60)
+        .await
+        .expect("seller channel ready");
+    pair.buyer
+        .wait_for_event(|event| matches!(event, Event::ChannelReady { .. }), 60)
+        .await
+        .expect("buyer channel ready");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut ids = pair.channel_ids();
+    ids.sort();
+    assert!(ids.contains(&channel_id), "opened channel missing before restart");
+
+    pair.shutdown().await;
+    drop(pair);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let pair = DualNode::start(root.clone(), 19812, 19813, bitcoind).await.expect("restore");
+    let mut restored = pair.channel_ids();
+    restored.sort();
+    assert_eq!(restored, ids);
+    pair.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
