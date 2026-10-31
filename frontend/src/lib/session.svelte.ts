@@ -64,8 +64,11 @@ export class Session {
   relayUrl = $state("");
   health = $state<"unknown" | "up" | "down">("unknown");
   nodePubkey = $state("");
+  sellerPubkey = $state("");
   blockHeight = $state<number | null>(null);
   channels = $state<string[]>([]);
+  peersConnected = $state(false);
+  channelUsable = $state(false);
   escrows = $state<EscrowRecord[]>([]);
   selectedId = $state<string | null>(null);
   events = $state<WireEvent[]>([]);
@@ -166,6 +169,12 @@ export class Session {
     this.notice = "";
     this.selectedId = null;
     this.health = "unknown";
+    this.nodePubkey = "";
+    this.sellerPubkey = "";
+    this.blockHeight = null;
+    this.channels = [];
+    this.peersConnected = false;
+    this.channelUsable = false;
   }
 
   setPeer(peer: string) {
@@ -199,15 +208,42 @@ export class Session {
         api.listEscrows(this.pubkey),
       ]);
       this.nodePubkey = info.node_pubkey;
+      this.sellerPubkey = info.seller_pubkey ?? "";
       this.blockHeight = info.block_height;
       this.channels = channels;
       this.escrows = escrows;
+      try {
+        const status = await api.channelStatus(this.pubkey);
+        this.sellerPubkey = info.seller_pubkey ?? status.seller_pubkey;
+        this.peersConnected = status.peers_connected;
+        this.channelUsable = status.channels.some((channel) => channel.usable);
+      } catch {
+        this.peersConnected = false;
+        this.channelUsable = false;
+      }
       if (!this.selectedId && escrows[0]) {
         this.selectedId = escrows[0].id;
       }
       this.error = "";
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async openInternalChannel(capacitySatoshis = 1_000_000) {
+    if (!this.pubkey) {
+      throw new Error("sign in first");
+    }
+    this.busy = "opening channel";
+    try {
+      await api.openChannel(this.pubkey, capacitySatoshis);
+      this.error = "";
+      await this.refresh();
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      this.busy = "";
     }
   }
 

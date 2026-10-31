@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bitcoin::hashes::Hash;
 use lightning::events::{Event, PaymentPurpose};
 use ponthtlc::bitcoind::BitcoindFacade;
+use ponthtlc::dual::DualNode;
 use ponthtlc::http::{router, AppState};
-use ponthtlc::node::{build_node, EventSink};
 use ponthtlc::tenancy::EscrowStore;
 
 fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_json::Value) {
@@ -39,27 +39,6 @@ fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_js
     (status, value)
 }
 
-async fn wait_for_event<F>(sink: &EventSink, mut predicate: F, timeout_secs: u64) -> Option<Event>
-where
-    F: FnMut(&Event) -> bool,
-{
-    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        {
-            let sink_lock = sink.lock().expect("event sink mutex poisoned");
-            for event in sink_lock.iter() {
-                if predicate(event) {
-                    return Some(event.clone());
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 fn pubkey(seed: u8) -> String {
     hex::encode([seed; 32])
 }
@@ -80,61 +59,38 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
 
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let root = std::env::temp_dir().join(format!("ponthtlc-api-happy-{nanos}"));
-    let seller_dir = root.join("seller");
-    let buyer_dir = root.join("buyer");
-    std::fs::create_dir_all(&seller_dir).unwrap();
-    std::fs::create_dir_all(&buyer_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
 
-    let seller = build_node("seller", seller_dir.clone(), 19820, Arc::clone(&bitcoind)).await;
-    let buyer = build_node("buyer", buyer_dir.clone(), 19821, Arc::clone(&bitcoind)).await;
-    seller.remember_peer(buyer.node_pubkey, buyer.listen_addr).await.expect("connect");
-    for _ in 0..100 {
-        let connected = seller.peer_manager.peer_by_node_id(&buyer.node_pubkey).is_some()
-            && buyer.peer_manager.peer_by_node_id(&seller.node_pubkey).is_some();
-        if connected {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        seller.peer_manager.peer_by_node_id(&buyer.node_pubkey).is_some()
-            && buyer.peer_manager.peer_by_node_id(&seller.node_pubkey).is_some(),
-        "peers did not connect"
-    );
-
-    seller
-        .channel_manager
-        .create_channel(buyer.node_pubkey, 1_000_000, 0, 0, None, None)
-        .expect("create_channel");
-    wait_for_event(&seller.events, |event| matches!(event, Event::FundingGenerationReady { .. }), 30)
+    let pair = DualNode::start(root.clone(), 19820, 19821, Arc::clone(&bitcoind))
         .await
-        .expect("funding");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+        .expect("dual node");
+    assert!(pair.peers_connected(), "daemon nodes must be peered");
+    let channel_id = pair.open_internal_channel(1_000_000).await.expect("open channel");
+    assert!(!channel_id.is_empty());
     bitcoind.generate_blocks(12).await.expect("confirm");
-    wait_for_event(&seller.events, |event| matches!(event, Event::ChannelReady { .. }), 60)
+    pair.seller
+        .wait_for_event(|event| matches!(event, Event::ChannelReady { .. }), 60)
         .await
         .expect("seller channel ready");
-    wait_for_event(&buyer.events, |event| matches!(event, Event::ChannelReady { .. }), 60)
+    pair.buyer
+        .wait_for_event(|event| matches!(event, Event::ChannelReady { .. }), 60)
         .await
         .expect("buyer channel ready");
     tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(pair.has_usable_route(), "internal channel is not usable");
 
-    let buyer_app = router(Arc::new(AppState {
-        node: Arc::clone(&buyer),
-        store: Mutex::new(EscrowStore::open(buyer_dir.join("escrows.json")).unwrap()),
+    let app = router(Arc::new(AppState {
+        node: pair.clone(),
+        store: Mutex::new(EscrowStore::open(root.join("escrows.json")).unwrap()),
         nostr_secret: [1u8; 32],
     }));
-    let seller_app = router(Arc::new(AppState {
-        node: Arc::clone(&seller),
-        store: Mutex::new(EscrowStore::open(seller_dir.join("escrows.json")).unwrap()),
-        nostr_secret: [2u8; 32],
-    }));
-    let buyer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let seller_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let buyer_url = format!("http://{}", buyer_listener.local_addr().unwrap());
-    let seller_url = format!("http://{}", seller_listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(buyer_listener, buyer_app).await.unwrap() });
-    tokio::spawn(async move { axum::serve(seller_listener, seller_app).await.unwrap() });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let listed = curl_json("GET", &format!("{url}/api/node/channels"), &pubkey(0x11), "");
+    assert_eq!(listed.0, 200, "{}", listed.1);
+    assert!(listed.1.to_string().contains(&channel_id), "{}", listed.1);
 
     let mut preimage = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut preimage);
@@ -143,7 +99,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     let seller_owner = pubkey(0x22);
     let (status, created) = curl_json(
         "POST",
-        &format!("{buyer_url}/api/escrow/create"),
+        &format!("{url}/api/escrow/create"),
         &buyer_owner,
         &format!(
             "{{\"payment_hash\":\"{}\",\"amount_msat\":50000000}}",
@@ -157,19 +113,17 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
 
     let (status, paid) = curl_json(
         "POST",
-        &format!("{seller_url}/api/escrow/{id}/fund"),
+        &format!("{url}/api/escrow/{id}/fund"),
         &seller_owner,
         &format!("{{\"bolt11\":\"{invoice}\"}}"),
     );
     assert_eq!(status, 200, "{paid}");
 
-    let claimable = wait_for_event(
-        &buyer.events,
-        |event| matches!(event, Event::PaymentClaimable { .. }),
-        30,
-    )
-    .await
-    .expect("buyer never received PaymentClaimable");
+    let claimable = pair
+        .buyer
+        .wait_for_event(|event| matches!(event, Event::PaymentClaimable { .. }), 30)
+        .await
+        .expect("buyer never received PaymentClaimable");
     match &claimable {
         Event::PaymentClaimable { purpose, .. } => match purpose {
             PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => {
@@ -182,22 +136,18 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
 
     let (status, claimed) = curl_json(
         "POST",
-        &format!("{buyer_url}/api/escrow/{id}/claim"),
+        &format!("{url}/api/escrow/{id}/claim"),
         &buyer_owner,
         &format!("{{\"preimage\":\"{}\"}}", hex::encode(preimage)),
     );
     assert_eq!(status, 200, "{claimed}");
 
-    wait_for_event(&seller.events, |event| matches!(event, Event::PaymentSent { .. }), 30)
+    pair.seller
+        .wait_for_event(|event| matches!(event, Event::PaymentSent { .. }), 30)
         .await
         .expect("seller never saw PaymentSent");
 
-    let (status, settled) = curl_json(
-        "GET",
-        &format!("{buyer_url}/api/escrow/{id}"),
-        &buyer_owner,
-        "",
-    );
+    let (status, settled) = curl_json("GET", &format!("{url}/api/escrow/{id}"), &buyer_owner, "");
     assert_eq!(status, 200, "{settled}");
     assert_eq!(settled["protocol_status"].as_str().unwrap(), "settled");
 
@@ -206,7 +156,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     let fail_hash = bitcoin::hashes::sha256::Hash::hash(&fail_preimage).to_byte_array();
     let (status, failed_invoice) = curl_json(
         "POST",
-        &format!("{buyer_url}/api/escrow/create"),
+        &format!("{url}/api/escrow/create"),
         &buyer_owner,
         &format!(
             "{{\"payment_hash\":\"{}\",\"amount_msat\":10000000}}",
@@ -218,37 +168,31 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     let fail_id = failed_invoice["id"].as_str().unwrap();
     let (status, funded_fail) = curl_json(
         "POST",
-        &format!("{seller_url}/api/escrow/{fail_id}/fund"),
+        &format!("{url}/api/escrow/{fail_id}/fund"),
         &seller_owner,
         &format!("{{\"bolt11\":\"{fail_bolt11}\"}}"),
     );
     assert_eq!(status, 200, "{funded_fail}");
-    wait_for_event(
-        &buyer.events,
-        |event| match event {
-            Event::PaymentClaimable { payment_hash, .. } => payment_hash.0 == fail_hash,
-            _ => false,
-        },
-        30,
-    )
-    .await
-    .expect("second PaymentClaimable");
-    let (status, failed) = curl_json(
-        "POST",
-        &format!("{buyer_url}/api/escrow/{fail_id}/fail"),
-        &buyer_owner,
-        "",
-    );
+    pair.buyer
+        .wait_for_event(
+            |event| match event {
+                Event::PaymentClaimable { payment_hash, .. } => payment_hash.0 == fail_hash,
+                _ => false,
+            },
+            30,
+        )
+        .await
+        .expect("second PaymentClaimable");
+    let (status, failed) = curl_json("POST", &format!("{url}/api/escrow/{fail_id}/fail"), &buyer_owner, "");
     assert_eq!(status, 200, "{failed}");
-    wait_for_event(&seller.events, |event| matches!(event, Event::PaymentFailed { .. }), 30)
+    pair.seller
+        .wait_for_event(|event| matches!(event, Event::PaymentFailed { .. }), 30)
         .await
         .expect("seller never saw PaymentFailed");
 
-    assert_daemon_files_omit_preimage(&buyer_dir, &preimage);
-    assert_daemon_files_omit_preimage(&seller_dir, &preimage);
+    assert_daemon_files_omit_preimage(&root, &preimage);
 
-    seller.shutdown().await;
-    buyer.shutdown().await;
+    pair.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -267,7 +211,6 @@ fn daemon_files_contain_secret(dir: &Path, hex_secret: &str, raw_secret: &[u8]) 
     for entry in entries.flatten() {
         let child = entry.path();
         let name = child.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        // LDK writes the revealed preimage into the channel monitor and manager so it can settle.
         if name == "monitors" || name == "monitor_updates" || name == "manager" || name.starts_with("manager.") {
             continue;
         }

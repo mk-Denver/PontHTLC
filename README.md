@@ -123,7 +123,7 @@ docker compose up -d                    # start bitcoind regtest + Nostr relay
 cargo test -p ponthtlc-protocol         # 14 tests: PIP stack, state machine, offers
 cargo test -p ponthtlc-escrow           # 7 tests: Shamir, LDK bridge mock
 cargo test -p ponthtlc-spike            # 15 tests: GF(2^8) Shamir math
-cargo test -p ponthtlc --lib            # 5 tests: HTTP API, escrow store
+cargo test -p ponthtlc --lib            # HTTP API, escrow store, channel-open route
 
 # integration tests (require Docker containers)
 cargo run -p ponthtlc-spike -- --scenario happy    # LDK hold-invoice lifecycle
@@ -148,8 +148,8 @@ cd frontend && npm test && npm run dev
 
 ## Status
 
-Issues #1 (hosted node daemon) and #2 (Pontmore PIP stack) are **merged**.
-The protocol layer, Nostr transport, and escrow bridge are live with 44
-passing tests across the workspace. See
-[issues #3–#5](https://github.com/mk-Denver/PontHTLC/issues) for the
-remaining MVP plan (REST API, frontend, Docker orchestration).
+Issues #1–#4 are **merged**. The hosted daemon, PIP stack, REST API, and
+browser desks are live. Issue #11 puts a buyer node and a seller node in
+one daemon so `fund` can route through an internal channel. See
+[issue #5](https://github.com/mk-Denver/PontHTLC/issues/5) for Docker
+orchestration.
