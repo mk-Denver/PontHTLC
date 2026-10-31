@@ -42,6 +42,7 @@ small trades:
 | [`ponthtlc-nostr`](crates/ponthtlc-nostr) | NIP-04 encryption, NIP-59 gift-wrap transport (signed rumor → seal → gift wrap), WebSocket relay client | `ponthtlc-protocol` |
 | [`ponthtlc-escrow`](crates/ponthtlc-escrow) | LDK bridge — maps protocol state transitions to `create_inbound_payment_for_hash` / `claim_funds` / `fail_htlc_backwards`, plus 2-of-3 Shamir secret sharing | `ponthtlc-protocol`, `ponthtlc` |
 | [`ponthtlc-spike`](crates/spike) | One-shot integration test — exercises the full LDK hold-invoice lifecycle against bitcoind regtest (happy / fail / hold) | `ponthtlc` |
+| [`frontend/`](frontend) | Svelte + Vite escrow UI — client-side Shamir reconstruction, NIP-59 share exchange, WebSocket events | hosted `ponthtlc` API |
 
 ## Protocol stack
 
@@ -129,6 +130,9 @@ cargo run -p ponthtlc-spike -- --scenario happy    # LDK hold-invoice lifecycle
 cargo run -p ponthtlc-spike -- --scenario fail     # fail_htlc_backwards → PaymentFailed
 cargo run -p ponthtlc-spike -- --scenario hold     # expiry past claim_deadline
 cargo test -p ponthtlc-nostr --test relay_integration  # NIP-59 round-trip via strfry
+
+# frontend (issue #4 — no daemon required for unit tests)
+cd frontend && npm test && npm run dev
 ```
 
 ## Documentation

@@ -8,6 +8,36 @@ use ponthtlc_escrow::ldk_bridge::{EscrowNode, LdkBridge};
 use ponthtlc_escrow::machine::EscrowMachine;
 use ponthtlc_protocol::swap_v1::SwapStatus;
 
+fn vector_preimage(seed: u8) -> [u8; 32] {
+    let mut preimage = [0u8; 32];
+    for (i, byte) in preimage.iter_mut().enumerate() {
+        *byte = seed.wrapping_add(i as u8);
+    }
+    preimage
+}
+
+fn vector_slopes(seed: u8) -> [u8; 32] {
+    let mut slopes = [0u8; 32];
+    for (i, byte) in slopes.iter_mut().enumerate() {
+        *byte = seed.wrapping_mul(3).wrapping_add(i as u8).max(1);
+    }
+    slopes
+}
+
+#[test]
+fn deterministic_split_matches_all_pairs() {
+    for seed in [0x11u8, 0x42, 0xab, 0x5a, 0xfe] {
+        let preimage = vector_preimage(seed);
+        let slopes = vector_slopes(seed);
+        let shares = split_preimage_with_slopes(&preimage, &slopes);
+        assert_eq!(shares[0].bytes[0], preimage[0] ^ slopes[0]);
+        assert_eq!(shares[1].bytes[0], preimage[0] ^ gf_mul(slopes[0], 2));
+        assert_eq!(shares[0].combine_with(&shares[1]), preimage);
+        assert_eq!(shares[0].combine_with(&shares[2]), preimage);
+        assert_eq!(shares[1].combine_with(&shares[2]), preimage);
+    }
+}
+
 #[test]
 fn split_then_combine_all_pairs() {
     let preimage = [0x42u8; 32];
