@@ -77,6 +77,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         .await
         .expect("buyer channel ready");
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let channel_id = pair.existing_channel_id().expect("real channel id after ChannelReady");
     assert!(pair.has_usable_route(), "internal channel is not usable");
 
     let app = router(Arc::new(AppState {

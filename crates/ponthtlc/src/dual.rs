@@ -77,8 +77,7 @@ impl DualNode {
         if let Some(channel_id) = self.existing_channel_id() {
             return Ok(channel_id);
         }
-        let channel_id = self
-            .seller
+        self.seller
             .channel_manager
             .create_channel(self.buyer.node_pubkey, capacity_satoshis, 0, 0, None, None)
             .map_err(|err| format!("create_channel failed: {:?}", err))?;
@@ -86,8 +85,14 @@ impl DualNode {
             .wait_for_event(|event| matches!(event, Event::FundingGenerationReady { .. }), 30)
             .await
             .ok_or_else(|| "FundingGenerationReady never fired".to_string())?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        Ok(channel_id.to_string())
+        for _ in 0..20 {
+            if let Some(channel_id) = self.existing_channel_id() {
+                return Ok(channel_id);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.existing_channel_id()
+            .ok_or_else(|| "funded channel id never appeared after FundingGenerationReady".to_string())
     }
 
     pub fn channel_ids(&self) -> Vec<String> {
