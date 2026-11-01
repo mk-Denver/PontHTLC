@@ -26,9 +26,27 @@
   <section class="panel">
     <h2>Node</h2>
     <p class="tiny">{session.health === "up" ? "Reachable through the Vite proxy" : "Start `ponthtlc` on :9800"}</p>
-    <p class="tiny mono break">{session.nodePubkey || "—"}</p>
-    <p class="tiny">{session.channels.length} channel{session.channels.length === 1 ? "" : "s"}</p>
-    <button class="btn ghost" type="button" onclick={() => session.refresh()}>Ping again</button>
+    <p class="tiny mono break">buyer {session.nodePubkey || "—"}</p>
+    <p class="tiny mono break">seller {session.sellerPubkey || "—"}</p>
+    <p class="tiny">
+      {session.peersConnected ? "Peers linked" : "Peers not linked"}
+      · {session.channels.length} channel{session.channels.length === 1 ? "" : "s"}
+      {session.channelUsable ? " · usable" : ""}
+    </p>
+    <div class="row">
+      <button class="btn ghost" type="button" onclick={() => session.refresh()}>Ping again</button>
+      <button
+        class="btn"
+        type="button"
+        disabled={session.busy !== "" || session.channelUsable}
+        onclick={() => void session.openInternalChannel().catch(() => {})}
+      >
+        {session.channelUsable ? "Channel ready" : "Open internal channel"}
+      </button>
+    </div>
+    {#if session.channels.length && !session.channelUsable}
+      <p class="tiny">Channel funded. Mine a few regtest blocks, then ping again.</p>
+    {/if}
   </section>
   <section class="panel">
     <h2>This key</h2>

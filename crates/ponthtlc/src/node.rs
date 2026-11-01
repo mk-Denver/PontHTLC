@@ -100,6 +100,14 @@ struct PeerRecord {
     addr: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ChannelSnapshot {
+    pub channel_id: String,
+    pub ready: bool,
+    pub usable: bool,
+    pub counterparty: String,
+}
+
 pub struct Node {
     pub name: &'static str,
     pub node_pubkey: PublicKey,
@@ -122,6 +130,52 @@ pub struct Node {
 impl Node {
     pub fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.events_tx.subscribe()
+    }
+
+    pub fn is_connected_to(&self, pubkey: &PublicKey) -> bool {
+        self.peer_manager.peer_by_node_id(pubkey).is_some()
+    }
+
+    pub fn listed_channel_ids(&self) -> Vec<String> {
+        self.channel_manager
+            .list_channels()
+            .into_iter()
+            .map(|channel| channel.channel_id.to_string())
+            .collect()
+    }
+
+    pub fn channel_snapshots(&self) -> Vec<ChannelSnapshot> {
+        self.channel_manager
+            .list_channels()
+            .into_iter()
+            .map(|channel| ChannelSnapshot {
+                channel_id: channel.channel_id.to_string(),
+                ready: channel.is_channel_ready,
+                usable: channel.is_usable,
+                counterparty: channel.counterparty.node_id.to_string(),
+            })
+            .collect()
+    }
+
+    pub async fn wait_for_event<F>(&self, mut predicate: F, timeout_secs: u64) -> Option<Event>
+    where
+        F: FnMut(&Event) -> bool,
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            {
+                let sink_lock = self.events.lock().expect("event sink mutex poisoned");
+                for event in sink_lock.iter() {
+                    if predicate(event) {
+                        return Some(event.clone());
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     pub async fn remember_peer(&self, pubkey: PublicKey, addr: SocketAddr) -> Result<(), String> {

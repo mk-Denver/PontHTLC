@@ -23,9 +23,10 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::dual::DualNode;
 use crate::events::WireEvent;
 use crate::invoice::{self, payment_hash_bytes};
-use crate::node::Node;
+use crate::node::{ChannelSnapshot, Node};
 use crate::tenancy::{EscrowRecord, EscrowStore};
 
 const NOSTR_PUBKEY_HEADER: &str = "x-nostr-pubkey";
@@ -39,7 +40,20 @@ pub trait HoldNode: Send + Sync {
     fn pay(&self, bolt11: &str) -> Result<[u8; 32], String>;
     fn subscribe(&self) -> broadcast::Receiver<WireEvent>;
     fn node_pubkey(&self) -> String;
+    fn buyer_pubkey(&self) -> String {
+        self.node_pubkey()
+    }
+    fn seller_pubkey(&self) -> String {
+        self.node_pubkey()
+    }
     fn channel_ids(&self) -> Vec<String>;
+    fn channel_snapshots(&self) -> Vec<ChannelSnapshot>;
+    fn peers_connected(&self) -> bool {
+        true
+    }
+    fn open_channel(
+        &self, capacity_satoshis: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>>;
     fn block_height(&self) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>;
 }
 
@@ -116,15 +130,86 @@ impl HoldNode for Arc<Node> {
     }
 
     fn channel_ids(&self) -> Vec<String> {
-        self.channel_manager
-            .list_channels()
-            .into_iter()
-            .map(|channel| channel.channel_id.to_string())
-            .collect()
+        Node::listed_channel_ids(self)
+    }
+
+    fn channel_snapshots(&self) -> Vec<ChannelSnapshot> {
+        Node::channel_snapshots(self)
+    }
+
+    fn open_channel(
+        &self, _capacity_satoshis: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async { Err("single node cannot open an internal channel".to_string()) })
     }
 
     fn block_height(&self) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> {
         let bitcoind = Arc::clone(&self.bitcoind);
+        Box::pin(async move { bitcoind.get_block_height().await })
+    }
+}
+
+impl HoldNode for DualNode {
+    fn register_hold(&self, payment_hash: [u8; 32], amount_msat: u64) -> Result<String, String> {
+        self.buyer.register_hold(payment_hash, amount_msat)
+    }
+
+    fn claim(&self, preimage: [u8; 32], payment_hash: [u8; 32]) -> Result<(), String> {
+        self.buyer.claim(preimage, payment_hash)
+    }
+
+    fn fail(&self, payment_hash: [u8; 32]) -> Result<(), String> {
+        self.buyer.fail(payment_hash)
+    }
+
+    fn pay(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        // Seller pays the buyer's hold invoice through the internal channel.
+        // One LDK node cannot route a payment to itself.
+        if !self.has_usable_route() {
+            return Err(
+                "no usable seller-to-buyer channel; POST /api/channel/open and mine confirmations"
+                    .to_string(),
+            );
+        }
+        self.seller.pay(bolt11)
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
+        self.subscribe_merged()
+    }
+
+    fn node_pubkey(&self) -> String {
+        self.buyer.node_pubkey.to_string()
+    }
+
+    fn buyer_pubkey(&self) -> String {
+        self.buyer.node_pubkey.to_string()
+    }
+
+    fn seller_pubkey(&self) -> String {
+        self.seller.node_pubkey.to_string()
+    }
+
+    fn channel_ids(&self) -> Vec<String> {
+        DualNode::channel_ids(self)
+    }
+
+    fn channel_snapshots(&self) -> Vec<ChannelSnapshot> {
+        DualNode::channel_snapshots(self)
+    }
+
+    fn peers_connected(&self) -> bool {
+        DualNode::peers_connected(self)
+    }
+
+    fn open_channel(
+        &self, capacity_satoshis: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async move { self.open_internal_channel(capacity_satoshis).await })
+    }
+
+    fn block_height(&self) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> {
+        let bitcoind = Arc::clone(&self.buyer.bitcoind);
         Box::pin(async move { bitcoind.get_block_height().await })
     }
 }
@@ -146,6 +231,8 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
         .route("/api/invoice/pay", post(pay_invoice::<N>))
+        .route("/api/channel/open", post(open_channel_route::<N>))
+        .route("/api/channel/status", get(channel_status::<N>))
         .route("/api/node/info", get(node_info::<N>))
         .route("/api/node/channels", get(node_channels::<N>))
         .route("/api/ws", get(ws_events::<N>))
@@ -396,7 +483,36 @@ async fn dispute_escrow<N: HoldNode>(
 #[derive(Serialize)]
 struct NodeInfo {
     node_pubkey: String,
+    buyer_pubkey: String,
+    seller_pubkey: String,
     block_height: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenChannelRequest {
+    capacity_satoshis: u64,
+}
+
+#[derive(Serialize)]
+struct OpenChannelResponse {
+    channel_id: String,
+}
+
+#[derive(Serialize)]
+struct ChannelStatusResponse {
+    peers_connected: bool,
+    buyer_pubkey: String,
+    seller_pubkey: String,
+    channels: Vec<ChannelStatusItem>,
+}
+
+#[derive(Serialize)]
+struct ChannelStatusItem {
+    channel_id: String,
+    ready: bool,
+    usable: bool,
+    counterparty: String,
 }
 
 async fn node_info<N: HoldNode>(
@@ -404,7 +520,43 @@ async fn node_info<N: HoldNode>(
 ) -> Result<Json<NodeInfo>, (StatusCode, String)> {
     let _owner = owner_from_headers(&headers)?;
     let block_height = state.node.block_height().await.map_err(bad_request)?;
-    Ok(Json(NodeInfo { node_pubkey: state.node.node_pubkey(), block_height }))
+    Ok(Json(NodeInfo {
+        node_pubkey: state.node.node_pubkey(),
+        buyer_pubkey: state.node.buyer_pubkey(),
+        seller_pubkey: state.node.seller_pubkey(),
+        block_height,
+    }))
+}
+
+async fn open_channel_route<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Json(body): Json<OpenChannelRequest>,
+) -> Result<Json<OpenChannelResponse>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let channel_id = state.node.open_channel(body.capacity_satoshis).await.map_err(bad_request)?;
+    Ok(Json(OpenChannelResponse { channel_id }))
+}
+
+async fn channel_status<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
+) -> Result<Json<ChannelStatusResponse>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let channels = state
+        .node
+        .channel_snapshots()
+        .into_iter()
+        .map(|snapshot| ChannelStatusItem {
+            channel_id: snapshot.channel_id,
+            ready: snapshot.ready,
+            usable: snapshot.usable,
+            counterparty: snapshot.counterparty,
+        })
+        .collect();
+    Ok(Json(ChannelStatusResponse {
+        peers_connected: state.node.peers_connected(),
+        buyer_pubkey: state.node.buyer_pubkey(),
+        seller_pubkey: state.node.seller_pubkey(),
+        channels,
+    }))
 }
 
 async fn node_channels<N: HoldNode>(
@@ -581,6 +733,21 @@ mod tests {
 
         fn channel_ids(&self) -> Vec<String> {
             vec!["channel-1".to_string()]
+        }
+
+        fn channel_snapshots(&self) -> Vec<ChannelSnapshot> {
+            vec![ChannelSnapshot {
+                channel_id: "channel-1".to_string(),
+                ready: true,
+                usable: true,
+                counterparty: "02".repeat(33),
+            }]
+        }
+
+        fn open_channel(
+            &self, _capacity_satoshis: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+            Box::pin(async { Ok("channel-1".to_string()) })
         }
 
         fn block_height(&self) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>> {
@@ -896,6 +1063,10 @@ mod tests {
         let info_json: serde_json::Value = serde_json::from_slice(&info_body).unwrap();
         assert_eq!(info_json["block_height"].as_u64().unwrap(), 42);
         assert!(!info_json["node_pubkey"].as_str().unwrap().is_empty());
+        assert_eq!(
+            info_json["buyer_pubkey"].as_str().unwrap(),
+            info_json["node_pubkey"].as_str().unwrap()
+        );
         let channels = application
             .oneshot(json_request("GET", "/api/node/channels", &owner, ""))
             .await
@@ -903,6 +1074,40 @@ mod tests {
         let channels_body = to_bytes(channels.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(channels_body.to_vec()).unwrap();
         assert!(text.contains("channel-1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn channel_open_returns_an_id() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-channel-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let owner = pubkey(0xaa);
+        let opened = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/channel/open",
+                &owner,
+                "{\"capacity_satoshis\":1000000}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened_body = to_bytes(opened.into_body(), usize::MAX).await.unwrap();
+        let opened_json: serde_json::Value = serde_json::from_slice(&opened_body).unwrap();
+        assert_eq!(opened_json["channel_id"].as_str().unwrap(), "channel-1");
+        let status = application
+            .oneshot(json_request("GET", "/api/channel/status", &owner, ""))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["peers_connected"].as_bool().unwrap(), true);
+        assert_eq!(status_json["channels"][0]["channel_id"].as_str().unwrap(), "channel-1");
+        assert_eq!(status_json["channels"][0]["usable"].as_bool().unwrap(), true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

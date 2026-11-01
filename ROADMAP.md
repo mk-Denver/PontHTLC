@@ -21,14 +21,15 @@ via browser + Nostr. Users don't run their own node. See
 Preimage reconstruction is client-side (browser); the hosted node
 never stores P.
 
-Track via [GitHub issues #1–#5](https://github.com/mk-Denver/PontHTLC/issues).
+Track via [GitHub issues #1–#5](https://github.com/mk-Denver/PontHTLC/issues) and [#11](https://github.com/mk-Denver/PontHTLC/issues/11).
 
 | Issue | Component | Status |
 | --- | --- | --- |
-| #1 | Hosted HTLC node daemon (multi-tenant, persistent, restart recovery) | open |
-| #2 | Nostr escrow (NIP-59 + `pontmore/swap@1` state machine, client-side preimage) | open |
-| #3 | Backend API (REST + WebSocket, preimage pass-through) | open |
-| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | in progress |
+| #1 | Hosted HTLC node daemon (multi-tenant, persistent, restart recovery) | merged |
+| #2 | Nostr escrow (NIP-59 + `pontmore/swap@1` state machine, client-side preimage) | merged |
+| #3 | Backend API (REST + WebSocket, preimage pass-through) | merged |
+| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | merged (e2e blocked on #11) |
+| #11 | Multi-node daemon (buyer + seller LDK nodes + channel open API) | in progress |
 | #5 | Docker Compose (4 services: bitcoind, relay, ponthtlc, frontend) | open |
 
 ### MVP definition of done

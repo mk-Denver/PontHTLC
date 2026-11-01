@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use ponthtlc::bitcoind::BitcoindFacade;
+use ponthtlc::dual::DualNode;
 use ponthtlc::http::{router, AppState};
-use ponthtlc::node::build_node;
 use ponthtlc::tenancy::EscrowStore;
 
 #[tokio::main]
@@ -26,7 +26,28 @@ async fn main() {
         std::process::exit(1);
     }
     let data_dir = cfg.data_dir.clone();
-    let node = build_node("ponthtlc", data_dir.clone(), cfg.ln_port, bitcoind).await;
+    let node = match DualNode::start(
+        data_dir.clone(),
+        cfg.ln_port,
+        cfg.seller_ln_port,
+        bitcoind,
+    )
+    .await
+    {
+        Ok(node) => node,
+        Err(err) => {
+            eprintln!("failed to start buyer/seller nodes: {err}");
+            std::process::exit(1);
+        },
+    };
+    println!(
+        "ponthtlc buyer {} on {}",
+        node.buyer.node_pubkey, node.buyer.listen_addr
+    );
+    println!(
+        "ponthtlc seller {} on {}",
+        node.seller.node_pubkey, node.seller.listen_addr
+    );
     let store = match EscrowStore::open(data_dir.join("escrows.json")) {
         Ok(store) => store,
         Err(err) => {
@@ -56,6 +77,7 @@ struct DaemonConfig {
     data_dir: std::path::PathBuf,
     port: u16,
     ln_port: u16,
+    seller_ln_port: u16,
     bitcoind_host: String,
     bitcoind_port: u16,
     rpc_user: String,
@@ -78,10 +100,15 @@ fn parse_config() -> DaemonConfig {
     let port = args.get("port").map(|value| value.parse().expect("--port")).unwrap_or(9800);
     let ln_port =
         args.get("ln-port").map(|value| value.parse().expect("--ln-port")).unwrap_or(9735);
+    let seller_ln_port = args
+        .get("seller-ln-port")
+        .map(|value| value.parse().expect("--seller-ln-port"))
+        .unwrap_or(ln_port.saturating_add(1));
     DaemonConfig {
         data_dir: data_dir.into(),
         port,
         ln_port,
+        seller_ln_port,
         bitcoind_host: args.get("bitcoind-host").cloned().unwrap_or_else(|| "127.0.0.1".to_string()),
         bitcoind_port: args
             .get("bitcoind-port")

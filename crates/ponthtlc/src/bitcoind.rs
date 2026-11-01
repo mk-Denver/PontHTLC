@@ -55,7 +55,13 @@ impl BitcoindFacade {
                 println!("SPIKE_INFO: wallet created ({})", wallet_name);
                 Ok(())
             },
-            Err(e) if format!("{:?}", e).contains("already exists") => Ok(()),
+            Err(e) if format!("{:?}", e).contains("already exists") => {
+                match self.rpc.call_method::<Value>("loadwallet", &[json!(wallet_name)]).await {
+                    Ok(_) => Ok(()),
+                    Err(load_err) if format!("{:?}", load_err).contains("already loaded") => Ok(()),
+                    Err(load_err) => Err(format!("loadwallet failed: {:?}", load_err)),
+                }
+            },
             Err(e) => Err(format!("{:?}", e)),
         }
     }

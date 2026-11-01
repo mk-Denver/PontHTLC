@@ -16,7 +16,8 @@ npm run dev
 
 Open http://localhost:5173 in two tabs. Pick **buyer** in one and
 **seller** in the other. Vite proxies `/api` and `/api/ws` to
-`127.0.0.1:9800`.
+`127.0.0.1:9800`. On Desk, open the internal channel (then mine on
+regtest) before the seller funds a hold invoice.
 
 ## What this tab does
 
