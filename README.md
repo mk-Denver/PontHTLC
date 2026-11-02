@@ -106,6 +106,16 @@ docker compose up -d
 cargo run -p ponthtlc-spike -- --scenario happy
 ```
 
+### Run the MVP stack
+
+One command starts bitcoind, the Nostr relay, the hosted daemon, and the frontend:
+
+```bash
+docker compose -f docker-compose.mvp.yml up --build
+```
+
+`http://127.0.0.1:9800/health/live` returns `ok`. The escrow dashboard is at `http://127.0.0.1:5173`. Open that address in two browser tabs, one buyer and one seller. `make test-happy`, `make test-fail`, and `make test-hold` run the spike scenarios. `scripts/integration-test.sh` brings the stack up, checks health, then runs the relay, API, and restart tests.
+
 ### Run the spike
 
 ```bash

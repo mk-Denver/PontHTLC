@@ -58,7 +58,7 @@ async fn main() {
     let nostr_secret = load_or_create_nostr_secret(&data_dir);
     let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret });
     let app = router(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], cfg.port));
+    let addr = SocketAddr::from((cfg.bind, cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -75,6 +75,7 @@ async fn main() {
 
 struct DaemonConfig {
     data_dir: std::path::PathBuf,
+    bind: std::net::IpAddr,
     port: u16,
     ln_port: u16,
     seller_ln_port: u16,
@@ -97,6 +98,11 @@ fn parse_config() -> DaemonConfig {
         eprintln!("--data-dir is required");
         std::process::exit(1);
     });
+    let bind = args.get("bind").map(|value| value.as_str()).unwrap_or("127.0.0.1");
+    let bind: std::net::IpAddr = bind.parse().unwrap_or_else(|_| {
+        eprintln!("--bind must be an IP address, got {bind}");
+        std::process::exit(1);
+    });
     let port = args.get("port").map(|value| value.parse().expect("--port")).unwrap_or(9800);
     let ln_port =
         args.get("ln-port").map(|value| value.parse().expect("--ln-port")).unwrap_or(9735);
@@ -106,6 +112,7 @@ fn parse_config() -> DaemonConfig {
         .unwrap_or(ln_port.saturating_add(1));
     DaemonConfig {
         data_dir: data_dir.into(),
+        bind,
         port,
         ln_port,
         seller_ln_port,
