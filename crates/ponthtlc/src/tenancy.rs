@@ -179,18 +179,6 @@ impl EscrowStore {
         self.persist()
     }
 
-    pub fn set_root_id(&mut self, id: &str, root_id: &str) -> Result<(), String> {
-        let record = self
-            .state
-            .escrows
-            .iter_mut()
-            .find(|record| record.id == id)
-            .ok_or_else(|| "escrow not found".to_string())?;
-        record.root_id = Some(root_id.to_string());
-        record.tip_id = Some(root_id.to_string());
-        self.persist()
-    }
-
     pub fn append_event(&mut self, escrow_id: &str, event: NostrEvent) -> Result<String, String> {
         let chain = self
             .state
