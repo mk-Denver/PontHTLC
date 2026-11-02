@@ -18,6 +18,7 @@ use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use ponthtlc_escrow::{EscrowNode, LdkBridge};
 use ponthtlc_nostr::nip59::wrap_payload;
 use ponthtlc_nostr::payloads::PayloadBody;
+use ponthtlc_nostr::relay::Relay;
 use ponthtlc_protocol::event::{pubkey_from_secret, NostrEvent};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -218,6 +219,7 @@ pub struct AppState<N: HoldNode> {
     pub node: N,
     pub store: Mutex<EscrowStore>,
     pub nostr_secret: [u8; 32],
+    pub relay_url: Option<String>,
 }
 
 pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
@@ -226,6 +228,7 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/create", post(create_escrow::<N>))
         .route("/api/escrows", get(list_escrows::<N>))
         .route("/api/escrow/:id", get(get_escrow::<N>))
+        .route("/api/escrow/:id/events", get(escrow_events::<N>))
         .route("/api/escrow/:id/claim", post(claim_escrow::<N>))
         .route("/api/escrow/:id/fund", post(fund_escrow::<N>))
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
@@ -301,6 +304,39 @@ async fn create_escrow<N: HoldNode>(
         state.node.register_hold(payment_hash, body.amount_msat).map_err(bad_request)?;
     let id = new_id();
     let payment_hash_hex = hex::encode(payment_hash);
+    let signer_pk = pubkey_from_secret(&state.nostr_secret);
+    let now = ponthtlc_protocol::event::now();
+    let root_input = ponthtlc_protocol::events::RootInput {
+        signer_pubkey: signer_pk.clone(),
+        agent: signer_pk.clone(),
+        customer: owner.clone(),
+        escrow: signer_pk.clone(),
+        resolver: signer_pk.clone(),
+        descriptor_id: format!("30361:{}:lightning-hold-invoice", signer_pk),
+        terms: ponthtlc_protocol::swap_v1::SwapTerms {
+            direction: ponthtlc_protocol::swap_v1::Direction::FiatToBtc,
+            fiat: ponthtlc_protocol::swap_v1::FiatTerms {
+                currency: "USD".to_string(),
+                amount: "0".to_string(),
+            },
+            bitcoin: ponthtlc_protocol::swap_v1::BitcoinTerms {
+                amount: body.amount_msat.to_string(),
+                unit: "sat".to_string(),
+                network: "lightning".to_string(),
+            },
+            payment_channel: "lightning_hold_invoice".to_string(),
+            deadlines: ponthtlc_protocol::swap_v1::DeadlineTerms {
+                fiat_pay_by: now + 3600,
+                fiat_confirm_by: now + 7200,
+            },
+        },
+        expires_at: now + 1800,
+        commitments: None,
+    };
+    let root_template = ponthtlc_protocol::events::root_template(&root_input);
+    let root_event = ponthtlc_protocol::events::sign_event(root_template, &state.nostr_secret)
+        .map_err(bad_request)?;
+    let root_id = root_event.id.clone();
     state
         .store
         .lock()
@@ -312,8 +348,18 @@ async fn create_escrow<N: HoldNode>(
             state: "open".to_string(),
             bolt11: bolt11_invoice.clone(),
             protocol_status: "secured".to_string(),
+            root_id: Some(root_id.clone()),
+            tip_id: Some(root_id.clone()),
         })
         .map_err(bad_request)?;
+    state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .append_event(&id, root_event.clone())
+        .map_err(bad_request)?;
+    let relay_url = state.relay_url.clone();
+    publish_event(&relay_url, &root_event).await;
     Ok(Json(CreateResponse { id, payment_hash: payment_hash_hex, bolt11_invoice }))
 }
 
@@ -336,6 +382,20 @@ async fn get_escrow<N: HoldNode>(
         .get_owned(&id, &owner)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     Ok(Json(record))
+}
+
+async fn escrow_events<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<Json<Vec<NostrEvent>>, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    let _record = state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .get_owned(&id, &owner)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let events = state.store.lock().expect("escrow store mutex poisoned").get_events(&id);
+    Ok(Json(events))
 }
 
 #[derive(Deserialize)]
@@ -390,6 +450,12 @@ async fn fund_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .record_outgoing(&payer, &payment_hash_hex)
         .map_err(bad_request)?;
+    let _action_id = sign_and_store_action(&state, &id, "core/secure", None)
+        .map_err(bad_request)?;
+    let event_to_publish = state.store.lock().expect("escrow store mutex poisoned").get_events(&id).last().cloned();
+    if let Some(event) = event_to_publish {
+        publish_event(&state.relay_url.clone(), &event).await;
+    }
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
 }
 
@@ -419,6 +485,14 @@ async fn fail_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_fail_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let _auth_id = sign_and_store_action(&state, &id, "core/authorize_refund", None)
+        .map_err(bad_request)?;
+    let _refund_id = sign_and_store_action(&state, &id, "core/refund", None)
+        .map_err(bad_request)?;
+    let event_to_publish = state.store.lock().expect("escrow store mutex poisoned").get_events(&id).last().cloned();
+    if let Some(event) = event_to_publish {
+        publish_event(&state.relay_url.clone(), &event).await;
+    }
     Ok(StatusCode::OK)
 }
 
@@ -591,6 +665,14 @@ async fn claim_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_claim_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let _auth_id = sign_and_store_action(&state, &id, "core/authorize_settlement", None)
+        .map_err(bad_request)?;
+    let _settle_id = sign_and_store_action(&state, &id, "core/settle", None)
+        .map_err(bad_request)?;
+    let event_to_publish = state.store.lock().expect("escrow store mutex poisoned").get_events(&id).last().cloned();
+    if let Some(event) = event_to_publish {
+        publish_event(&state.relay_url.clone(), &event).await;
+    }
     Ok(StatusCode::OK)
 }
 
@@ -690,6 +772,42 @@ fn new_id() -> String {
     hex::encode(bytes)
 }
 
+async fn publish_event(relay_url: &Option<String>, event: &NostrEvent) {
+    if let Some(url) = relay_url {
+        if let Ok(relay) = Relay::connect(url).await {
+            let _ = relay.publish(event).await;
+        }
+    }
+}
+
+fn sign_and_store_action<N: HoldNode>(
+    state: &Arc<AppState<N>>,
+    escrow_id: &str,
+    action: &str,
+    data: Option<serde_json::Value>,
+) -> Result<String, String> {
+    let (tip_id, secret) = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let tip = store.get_tip_id(escrow_id).ok_or_else(|| "no root_id for escrow".to_string())?;
+        (tip, state.nostr_secret)
+    };
+    let signer_pk = pubkey_from_secret(&secret);
+    let template = ponthtlc_protocol::events::action_template(
+        &signer_pk,
+        &tip_id,
+        &tip_id,
+        action,
+        data,
+        vec![],
+    );
+    let signed = ponthtlc_protocol::events::sign_event(template, &secret)?;
+    let event_id = {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        store.append_event(escrow_id, signed.clone())?
+    };
+    Ok(event_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +888,7 @@ mod tests {
             },
             store: Mutex::new(EscrowStore::open(dir.join("escrows.json")).unwrap()),
             nostr_secret: [9u8; 32],
+            relay_url: None,
         });
         (router(state), fails)
     }

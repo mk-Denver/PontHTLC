@@ -56,7 +56,8 @@ async fn main() {
         },
     };
     let nostr_secret = load_or_create_nostr_secret(&data_dir);
-    let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret });
+    let relay_url = cfg.relay_url.clone();
+    let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret, relay_url: Some(relay_url) });
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -82,6 +83,7 @@ struct DaemonConfig {
     bitcoind_port: u16,
     rpc_user: String,
     rpc_pass: String,
+    relay_url: String,
 }
 
 fn parse_config() -> DaemonConfig {
@@ -98,7 +100,7 @@ fn parse_config() -> DaemonConfig {
         std::process::exit(1);
     });
     let port = args.get("port").map(|value| value.parse().expect("--port")).unwrap_or(9800);
-    let ln_port =
+    let ln_port: u16 =
         args.get("ln-port").map(|value| value.parse().expect("--ln-port")).unwrap_or(9735);
     let seller_ln_port = args
         .get("seller-ln-port")
@@ -122,6 +124,10 @@ fn parse_config() -> DaemonConfig {
             eprintln!("warning: using default rpc-pass; pass --rpc-pass to override");
             "ponthtlc".to_string()
         }),
+        relay_url: args
+            .get("relay-url")
+            .cloned()
+            .unwrap_or_else(|| "ws://127.0.0.1:7777".to_string()),
     }
 }
 

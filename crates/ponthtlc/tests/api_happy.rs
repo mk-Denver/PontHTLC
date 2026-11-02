@@ -84,6 +84,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         node: pair.clone(),
         store: Mutex::new(EscrowStore::open(root.join("escrows.json")).unwrap()),
         nostr_secret: [1u8; 32],
+        relay_url: None,
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
