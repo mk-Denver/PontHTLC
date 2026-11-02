@@ -510,6 +510,10 @@ async fn fail_escrow<N: HoldNode>(
                 if record.protocol_status == "fail_submitted" || record.protocol_status == "disputed" {
                     return Err((StatusCode::CONFLICT, "escrow is already failed or disputed".to_string()));
                 }
+                if record.protocol_status != "accepted" && record.protocol_status != "secured"
+                    && record.protocol_status != "proposed" {
+                    return Err((StatusCode::CONFLICT, "escrow must be funded before it can fail".to_string()));
+                }
                 decode_fixed_hex(&record.payment_hash, "payment_hash")?
             }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
@@ -549,6 +553,12 @@ async fn expire_escrow<N: HoldNode>(
                     return Err((
                         StatusCode::CONFLICT,
                         "escrow is already terminal".to_string(),
+                    ));
+                }
+                if record.protocol_status == "proposed" {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "escrow must be accepted before it can expire".to_string(),
                     ));
                 }
             },
@@ -594,6 +604,12 @@ async fn dispute_escrow<N: HoldNode>(
                 }
                 if record.protocol_status == "disputed" {
                     return Err((StatusCode::CONFLICT, "escrow is already disputed".to_string()));
+                }
+                if record.protocol_status != "accepted" && record.protocol_status != "secured"
+                    && record.protocol_status != "fiat_sent" && record.protocol_status != "fiat_confirmed"
+                    && record.protocol_status != "proposed"
+                {
+                    return Err((StatusCode::CONFLICT, "escrow must be funded before dispute".to_string()));
                 }
                 record.payment_hash
             }
