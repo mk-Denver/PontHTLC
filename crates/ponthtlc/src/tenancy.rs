@@ -168,6 +168,17 @@ impl EscrowStore {
         self.persist()
     }
 
+    pub fn mark_protocol_status(&mut self, id: &str, status: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.protocol_status = status.to_string();
+        self.persist()
+    }
+
     pub fn set_root_id(&mut self, id: &str, root_id: &str) -> Result<(), String> {
         let record = self
             .state
