@@ -340,7 +340,7 @@ async fn create_escrow<N: HoldNode>(
     let descriptor_id = descriptor_event.id.clone();
 
     let root_input = ponthtlc_protocol::events::RootInput {
-        signer_pubkey: signer_pk.clone(),
+        signer_pubkey: customer_pk.clone(),
         agent: agent_pk.clone(),
         customer: customer_pk.clone(),
         escrow: escrow_pk.clone(),
@@ -367,7 +367,8 @@ async fn create_escrow<N: HoldNode>(
         commitments: None,
     };
     let root_template = ponthtlc_protocol::events::root_template(&root_input);
-    let root_event = ponthtlc_protocol::events::sign_event(root_template, &state.nostr_secret)
+    let customer_secret = secret_for_role(&state.nostr_secret, "customer");
+    let root_event = ponthtlc_protocol::events::sign_event(root_template, &customer_secret)
         .map_err(bad_request)?;
     let root_id = root_event.id.clone();
     let relay_url = state.relay_url.clone();
@@ -489,7 +490,7 @@ async fn fund_escrow<N: HoldNode>(
         .map_err(bad_request)?;
     {
         let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "accepted");
+        let _ = store.mark_protocol_status(&id, "secured");
     }
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[accept_event, secure_event]).await;
@@ -510,8 +511,7 @@ async fn fail_escrow<N: HoldNode>(
                 if record.protocol_status == "fail_submitted" || record.protocol_status == "disputed" {
                     return Err((StatusCode::CONFLICT, "escrow is already failed or disputed".to_string()));
                 }
-                if record.protocol_status != "accepted" && record.protocol_status != "secured"
-                    && record.protocol_status != "proposed" {
+                if record.protocol_status != "secured" {
                     return Err((StatusCode::CONFLICT, "escrow must be funded before it can fail".to_string()));
                 }
                 decode_fixed_hex(&record.payment_hash, "payment_hash")?
@@ -547,21 +547,13 @@ async fn expire_escrow<N: HoldNode>(
         let store = state.store.lock().expect("escrow store mutex poisoned");
         match store.get_owned(&id, &owner) {
             Some(record) => {
-                if record.protocol_status == "settled" || record.protocol_status == "refunded"
-                    || record.protocol_status == "expired"
-                {
+                if record.protocol_status != "proposed" {
                     return Err((
                         StatusCode::CONFLICT,
-                        "escrow is already terminal".to_string(),
+                        "core/expire is only valid before the swap is accepted".to_string(),
                     ));
                 }
-                if record.protocol_status == "proposed" {
-                    return Err((
-                        StatusCode::CONFLICT,
-                        "escrow must be accepted before it can expire".to_string(),
-                    ));
-                }
-            },
+            }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
         }
     }
@@ -607,7 +599,6 @@ async fn dispute_escrow<N: HoldNode>(
                 }
                 if record.protocol_status != "accepted" && record.protocol_status != "secured"
                     && record.protocol_status != "fiat_sent" && record.protocol_status != "fiat_confirmed"
-                    && record.protocol_status != "proposed"
                 {
                     return Err((StatusCode::CONFLICT, "escrow must be funded before dispute".to_string()));
                 }
@@ -935,12 +926,16 @@ fn sign_and_store_action<N: HoldNode>(
 fn secret_for_action(base: &[u8; 32], action: &str) -> [u8; 32] {
     let mut derived = *base;
     match action {
-        "core/accept" | "swap/fiat_sent" => derived[0] ^= 0x01,
+        "swap/fiat_sent" => derived[0] ^= 0x01,
         "core/secure" | "core/settle" | "core/refund" => derived[0] ^= 0x02,
         "core/resolve_dispute" => derived[0] ^= 0x03,
-        "core/authorize_settlement" | "swap/fiat_confirmed"
-        | "core/authorize_refund" | "core/expire" | "core/open_dispute" => {},
-        _ => {},
+        "core/accept"
+        | "swap/fiat_confirmed"
+        | "core/authorize_settlement"
+        | "core/authorize_refund"
+        | "core/expire"
+        | "core/open_dispute" => {}
+        _ => {}
     }
     derived
 }
@@ -1248,6 +1243,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (application, fails) = app_with_fails(&dir);
         let owner = pubkey(0x77);
+        let funder = pubkey(0x99);
         let payment_hash = "44".repeat(32);
         let preimage = "ee".repeat(32);
         let created = application
@@ -1260,6 +1256,14 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
         let id = created_json["id"].as_str().unwrap();
+        let bolt11 = created_json["bolt11_invoice"].as_str().unwrap();
+        let funded = application
+            .clone()
+            .oneshot(json_request("POST", &format!("/api/escrow/{id}/fund"), &funder,
+                &format!("{{\"bolt11\":\"{bolt11}\"}}")))
+            .await
+            .unwrap();
+        assert_eq!(funded.status(), StatusCode::OK);
         let failed = application
             .clone()
             .oneshot(json_request("POST", &format!("/api/escrow/{id}/fail"), &owner, "{}"))
@@ -1287,6 +1291,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let application = app(&dir);
         let owner = pubkey(0x88);
+        let funder = pubkey(0x99);
         let payment_hash = "55".repeat(32);
         let created = application
             .clone()
@@ -1298,6 +1303,14 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
         let id = created_json["id"].as_str().unwrap();
+        let bolt11 = created_json["bolt11_invoice"].as_str().unwrap();
+        let funded = application
+            .clone()
+            .oneshot(json_request("POST", &format!("/api/escrow/{id}/fund"), &funder,
+                &format!("{{\"bolt11\":\"{bolt11}\"}}")))
+            .await
+            .unwrap();
+        assert_eq!(funded.status(), StatusCode::OK);
         let resolver = "ab".repeat(32);
         let disputed = application
             .clone()
