@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use ponthtlc_protocol::event::NostrEvent;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EscrowRecord {
@@ -14,6 +16,10 @@ pub struct EscrowRecord {
     pub bolt11: String,
     #[serde(default)]
     pub protocol_status: String,
+    #[serde(default)]
+    pub root_id: Option<String>,
+    #[serde(default)]
+    pub tip_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +43,8 @@ struct DiskState {
     channels: Vec<ChannelAssignment>,
     #[serde(default)]
     outgoing: Vec<OutgoingPayment>,
+    #[serde(default)]
+    event_chains: std::collections::HashMap<String, Vec<NostrEvent>>,
 }
 
 pub struct EscrowStore {
@@ -160,6 +168,61 @@ impl EscrowStore {
         self.persist()
     }
 
+    pub fn mark_protocol_status(&mut self, id: &str, status: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.protocol_status = status.to_string();
+        self.persist()
+    }
+
+    pub fn append_event(&mut self, escrow_id: &str, event: NostrEvent) -> Result<String, String> {
+        let chain = self
+            .state
+            .event_chains
+            .entry(escrow_id.to_string())
+            .or_default();
+        chain.push(event.clone());
+        let event_id = event.id.clone();
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == escrow_id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.tip_id = Some(event_id.clone());
+        self.persist()?;
+        Ok(event_id)
+    }
+
+    pub fn get_events(&self, escrow_id: &str) -> Vec<NostrEvent> {
+        self.state
+            .event_chains
+            .get(escrow_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_root_id(&self, escrow_id: &str) -> Option<String> {
+        self.state
+            .escrows
+            .iter()
+            .find(|record| record.id == escrow_id)
+            .and_then(|record| record.root_id.clone())
+    }
+
+    pub fn get_tip_id(&self, escrow_id: &str) -> Option<String> {
+        self.state
+            .escrows
+            .iter()
+            .find(|record| record.id == escrow_id)
+            .and_then(|record| record.tip_id.clone())
+            .or_else(|| self.get_root_id(escrow_id))
+    }
+
     fn persist(&self) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
@@ -217,6 +280,8 @@ mod tests {
                 state: "open".to_string(),
                 bolt11: String::new(),
                 protocol_status: String::new(),
+                root_id: None,
+                tip_id: None,
             })
             .unwrap();
         store
@@ -227,6 +292,8 @@ mod tests {
                 state: "open".to_string(),
                 bolt11: String::new(),
                 protocol_status: String::new(),
+                root_id: None,
+                tip_id: None,
             })
             .unwrap();
         store.assign_channel("owner-a", "chan-a").unwrap();

@@ -18,6 +18,7 @@ use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use ponthtlc_escrow::{EscrowNode, LdkBridge};
 use ponthtlc_nostr::nip59::wrap_payload;
 use ponthtlc_nostr::payloads::PayloadBody;
+use ponthtlc_nostr::relay::Relay;
 use ponthtlc_protocol::event::{pubkey_from_secret, NostrEvent};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -218,6 +219,7 @@ pub struct AppState<N: HoldNode> {
     pub node: N,
     pub store: Mutex<EscrowStore>,
     pub nostr_secret: [u8; 32],
+    pub relay_url: Option<String>,
 }
 
 pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
@@ -226,9 +228,11 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/create", post(create_escrow::<N>))
         .route("/api/escrows", get(list_escrows::<N>))
         .route("/api/escrow/:id", get(get_escrow::<N>))
+        .route("/api/escrow/:id/events", get(escrow_events::<N>))
         .route("/api/escrow/:id/claim", post(claim_escrow::<N>))
         .route("/api/escrow/:id/fund", post(fund_escrow::<N>))
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
+        .route("/api/escrow/:id/expire", post(expire_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
         .route("/api/invoice/pay", post(pay_invoice::<N>))
         .route("/api/channel/open", post(open_channel_route::<N>))
@@ -277,6 +281,14 @@ async fn health() -> &'static str {
 struct CreateRequest {
     payment_hash: String,
     amount_msat: u64,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    fiat_currency: Option<String>,
+    #[serde(default)]
+    fiat_amount: Option<String>,
+    #[serde(default)]
+    payment_channel: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -301,6 +313,65 @@ async fn create_escrow<N: HoldNode>(
         state.node.register_hold(payment_hash, body.amount_msat).map_err(bad_request)?;
     let id = new_id();
     let payment_hash_hex = hex::encode(payment_hash);
+    let signer_pk = pubkey_from_secret(&state.nostr_secret);
+    let agent_pk = signer_pk.clone();
+    let customer_pk = pubkey_for_role(&state.nostr_secret, "customer");
+    let escrow_pk = pubkey_for_role(&state.nostr_secret, "escrow");
+    let resolver_pk = pubkey_for_role(&state.nostr_secret, "resolver");
+    let now = ponthtlc_protocol::event::now();
+
+    let direction = body.direction.as_deref().unwrap_or("fiat_to_btc");
+    let direction = ponthtlc_protocol::swap_v1::Direction::from_str(direction)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown direction: {direction}")))?;
+    let fiat_currency = body.fiat_currency.clone().unwrap_or_else(|| "USD".to_string());
+    let fiat_amount = body.fiat_amount.clone().unwrap_or_else(|| "1".to_string());
+    let payment_channel = body.payment_channel.clone()
+        .unwrap_or_else(|| "lightning-hold-invoice@1".to_string());
+
+    let agent_def = ponthtlc_protocol::events::agent_definition_template(&signer_pk, "");
+    let agent_event = ponthtlc_protocol::events::sign_event(agent_def, &state.nostr_secret)
+        .map_err(bad_request)?;
+
+    let descriptor_template =
+        ponthtlc_protocol::events::escrow_descriptor_template(&signer_pk, now + 86400);
+    let descriptor_event =
+        ponthtlc_protocol::events::sign_event(descriptor_template, &state.nostr_secret)
+            .map_err(bad_request)?;
+    let descriptor_id = descriptor_event.id.clone();
+
+    let root_input = ponthtlc_protocol::events::RootInput {
+        signer_pubkey: customer_pk.clone(),
+        agent: agent_pk.clone(),
+        customer: customer_pk.clone(),
+        escrow: escrow_pk.clone(),
+        resolver: resolver_pk.clone(),
+        descriptor_id,
+        terms: ponthtlc_protocol::swap_v1::SwapTerms {
+            direction,
+            fiat: ponthtlc_protocol::swap_v1::FiatTerms {
+                currency: fiat_currency,
+                amount: fiat_amount,
+            },
+            bitcoin: ponthtlc_protocol::swap_v1::BitcoinTerms {
+                amount: (body.amount_msat / 1000).to_string(),
+                unit: "sat".to_string(),
+                network: "lightning".to_string(),
+            },
+            payment_channel,
+            deadlines: ponthtlc_protocol::swap_v1::DeadlineTerms {
+                fiat_pay_by: now + 3600,
+                fiat_confirm_by: now + 7200,
+            },
+        },
+        expires_at: now + 1800,
+        commitments: None,
+    };
+    let root_template = ponthtlc_protocol::events::root_template(&root_input);
+    let customer_secret = secret_for_role(&state.nostr_secret, "customer");
+    let root_event = ponthtlc_protocol::events::sign_event(root_template, &customer_secret)
+        .map_err(bad_request)?;
+    let root_id = root_event.id.clone();
+    let relay_url = state.relay_url.clone();
     state
         .store
         .lock()
@@ -311,9 +382,18 @@ async fn create_escrow<N: HoldNode>(
             payment_hash: payment_hash_hex.clone(),
             state: "open".to_string(),
             bolt11: bolt11_invoice.clone(),
-            protocol_status: "secured".to_string(),
+            protocol_status: "proposed".to_string(),
+            root_id: Some(root_id.clone()),
+            tip_id: Some(root_id.clone()),
         })
         .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.append_event(&id, agent_event.clone());
+        let _ = store.append_event(&id, descriptor_event.clone());
+        let _ = store.append_event(&id, root_event.clone());
+    }
+    publish_event(&relay_url, &root_event).await;
     Ok(Json(CreateResponse { id, payment_hash: payment_hash_hex, bolt11_invoice }))
 }
 
@@ -336,6 +416,20 @@ async fn get_escrow<N: HoldNode>(
         .get_owned(&id, &owner)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     Ok(Json(record))
+}
+
+async fn escrow_events<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<Json<Vec<NostrEvent>>, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    let _record = state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .get_owned(&id, &owner)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let events = state.store.lock().expect("escrow store mutex poisoned").get_events(&id);
+    Ok(Json(events))
 }
 
 #[derive(Deserialize)]
@@ -390,6 +484,16 @@ async fn fund_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .record_outgoing(&payer, &payment_hash_hex)
         .map_err(bad_request)?;
+    let accept_event = sign_and_store_action(&state, &id, "core/accept", None)
+        .map_err(bad_request)?;
+    let secure_event = sign_and_store_action(&state, &id, "core/secure", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "secured");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[accept_event, secure_event]).await;
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
 }
 
@@ -407,6 +511,9 @@ async fn fail_escrow<N: HoldNode>(
                 if record.protocol_status == "fail_submitted" || record.protocol_status == "disputed" {
                     return Err((StatusCode::CONFLICT, "escrow is already failed or disputed".to_string()));
                 }
+                if record.protocol_status != "secured" {
+                    return Err((StatusCode::CONFLICT, "escrow must be funded before it can fail".to_string()));
+                }
                 decode_fixed_hex(&record.payment_hash, "payment_hash")?
             }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
@@ -419,6 +526,45 @@ async fn fail_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_fail_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let auth_event = sign_and_store_action(&state, &id, "core/authorize_refund", None)
+        .map_err(bad_request)?;
+    let refund_event = sign_and_store_action(&state, &id, "core/refund", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "refunded");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[auth_event, refund_event]).await;
+    Ok(StatusCode::OK)
+}
+
+async fn expire_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get_owned(&id, &owner) {
+            Some(record) => {
+                if record.protocol_status != "proposed" {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "core/expire is only valid before the swap is accepted".to_string(),
+                    ));
+                }
+            }
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let expire_event = sign_and_store_action(&state, &id, "core/expire", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "expired");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[expire_event]).await;
     Ok(StatusCode::OK)
 }
 
@@ -451,6 +597,11 @@ async fn dispute_escrow<N: HoldNode>(
                 if record.protocol_status == "disputed" {
                     return Err((StatusCode::CONFLICT, "escrow is already disputed".to_string()));
                 }
+                if record.protocol_status != "accepted" && record.protocol_status != "secured"
+                    && record.protocol_status != "fiat_sent" && record.protocol_status != "fiat_confirmed"
+                {
+                    return Err((StatusCode::CONFLICT, "escrow must be funded before dispute".to_string()));
+                }
                 record.payment_hash
             }
             None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
@@ -471,12 +622,21 @@ async fn dispute_escrow<N: HoldNode>(
         },
     )
     .map_err(bad_request)?;
+    let dispute_event = sign_and_store_action(
+        &state,
+        &id,
+        "core/open_dispute",
+        Some(serde_json::json!({"class": "timeout"})),
+    )
+    .map_err(bad_request)?;
     state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
         .mark_disputed(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[dispute_event]).await;
     Ok(Json(DisputeResponse { gift_wraps: wraps }))
 }
 
@@ -591,6 +751,34 @@ async fn claim_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_claim_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    let fiat_sent_event = sign_and_store_action(
+        &state,
+        &id,
+        "swap/fiat_sent",
+        Some(serde_json::json!({"payment_reference": stored_hash})),
+    )
+    .map_err(bad_request)?;
+    let fiat_confirmed_event = sign_and_store_action(
+        &state,
+        &id,
+        "swap/fiat_confirmed",
+        Some(serde_json::json!({"payment_reference": stored_hash})),
+    )
+    .map_err(bad_request)?;
+    let auth_event = sign_and_store_action(&state, &id, "core/authorize_settlement", None)
+        .map_err(bad_request)?;
+    let settle_event = sign_and_store_action(&state, &id, "core/settle", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "settled");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(
+        &relay_url,
+        &[fiat_sent_event, fiat_confirmed_event, auth_event, settle_event],
+    )
+    .await;
     Ok(StatusCode::OK)
 }
 
@@ -690,6 +878,85 @@ fn new_id() -> String {
     hex::encode(bytes)
 }
 
+async fn publish_event(relay_url: &Option<String>, event: &NostrEvent) {
+    if let Some(url) = relay_url {
+        if let Ok(relay) = Relay::connect(url).await {
+            let _ = relay.publish(event).await;
+        }
+    }
+}
+
+async fn publish_events(relay_url: &Option<String>, events: &[NostrEvent]) {
+    for event in events {
+        publish_event(relay_url, event).await;
+    }
+}
+
+fn sign_and_store_action<N: HoldNode>(
+    state: &Arc<AppState<N>>,
+    escrow_id: &str,
+    action: &str,
+    data: Option<serde_json::Value>,
+) -> Result<NostrEvent, String> {
+    let (root_id, prev_id, secret) = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let root = store.get_root_id(escrow_id)
+            .ok_or_else(|| "no root_id for escrow".to_string())?;
+        let prev = store.get_tip_id(escrow_id).unwrap_or_else(|| root.clone());
+        let secret = secret_for_action(&state.nostr_secret, action);
+        (root, prev, secret)
+    };
+    let signer_pk = pubkey_from_secret(&secret);
+    let template = ponthtlc_protocol::events::action_template(
+        &signer_pk,
+        &root_id,
+        &prev_id,
+        action,
+        data,
+        vec![],
+    );
+    let signed = ponthtlc_protocol::events::sign_event(template, &secret)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.append_event(escrow_id, signed.clone());
+    }
+    Ok(signed)
+}
+
+fn secret_for_action(base: &[u8; 32], action: &str) -> [u8; 32] {
+    let mut derived = *base;
+    match action {
+        "swap/fiat_sent" => derived[0] ^= 0x01,
+        "core/secure" | "core/settle" | "core/refund" => derived[0] ^= 0x02,
+        "core/resolve_dispute" => derived[0] ^= 0x03,
+        "core/accept"
+        | "swap/fiat_confirmed"
+        | "core/authorize_settlement"
+        | "core/authorize_refund"
+        | "core/expire"
+        | "core/open_dispute" => {}
+        _ => {}
+    }
+    derived
+}
+
+fn pubkey_for_role(base: &[u8; 32], role: &str) -> String {
+    let secret = secret_for_role(base, role);
+    pubkey_from_secret(&secret)
+}
+
+fn secret_for_role(base: &[u8; 32], role: &str) -> [u8; 32] {
+    let mut derived = *base;
+    match role {
+        "agent" => {},
+        "customer" => derived[0] ^= 0x01,
+        "escrow" => derived[0] ^= 0x02,
+        "resolver" => derived[0] ^= 0x03,
+        _ => {},
+    }
+    derived
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,8 +971,16 @@ mod tests {
     }
 
     impl HoldNode for FakeNode {
-        fn register_hold(&self, payment_hash: [u8; 32], _amount_msat: u64) -> Result<String, String> {
-            Ok(format!("lnbcrt1{}", hex::encode(payment_hash)))
+        fn register_hold(&self, payment_hash: [u8; 32], amount_msat: u64) -> Result<String, String> {
+            let keys = lightning::sign::KeysManager::new(&[4u8; 32], 1, 0, true);
+            let invoice = crate::invoice::build_hold_invoice(
+                &keys,
+                payment_hash,
+                lightning::types::payment::PaymentSecret([8u8; 32]),
+                amount_msat,
+                lightning_invoice::Currency::Regtest,
+            )?;
+            Ok(invoice.to_string())
         }
 
         fn claim(&self, preimage: [u8; 32], _payment_hash: [u8; 32]) -> Result<(), String> {
@@ -770,6 +1045,7 @@ mod tests {
             },
             store: Mutex::new(EscrowStore::open(dir.join("escrows.json")).unwrap()),
             nostr_secret: [9u8; 32],
+            relay_url: None,
         });
         (router(state), fails)
     }
@@ -844,7 +1120,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::OK);
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
-        assert!(created_json["bolt11_invoice"].as_str().unwrap().contains(&hash_a));
+        assert!(created_json["bolt11_invoice"].as_str().unwrap().starts_with("lnbcrt"));
         let id = created_json["id"].as_str().unwrap().to_string();
         let hidden = application
             .clone()
@@ -967,6 +1243,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (application, fails) = app_with_fails(&dir);
         let owner = pubkey(0x77);
+        let funder = pubkey(0x99);
         let payment_hash = "44".repeat(32);
         let preimage = "ee".repeat(32);
         let created = application
@@ -979,6 +1256,14 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
         let id = created_json["id"].as_str().unwrap();
+        let bolt11 = created_json["bolt11_invoice"].as_str().unwrap();
+        let funded = application
+            .clone()
+            .oneshot(json_request("POST", &format!("/api/escrow/{id}/fund"), &funder,
+                &format!("{{\"bolt11\":\"{bolt11}\"}}")))
+            .await
+            .unwrap();
+        assert_eq!(funded.status(), StatusCode::OK);
         let failed = application
             .clone()
             .oneshot(json_request("POST", &format!("/api/escrow/{id}/fail"), &owner, "{}"))
@@ -1006,6 +1291,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let application = app(&dir);
         let owner = pubkey(0x88);
+        let funder = pubkey(0x99);
         let payment_hash = "55".repeat(32);
         let created = application
             .clone()
@@ -1017,6 +1303,14 @@ mod tests {
         let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
         let id = created_json["id"].as_str().unwrap();
+        let bolt11 = created_json["bolt11_invoice"].as_str().unwrap();
+        let funded = application
+            .clone()
+            .oneshot(json_request("POST", &format!("/api/escrow/{id}/fund"), &funder,
+                &format!("{{\"bolt11\":\"{bolt11}\"}}")))
+            .await
+            .unwrap();
+        assert_eq!(funded.status(), StatusCode::OK);
         let resolver = "ab".repeat(32);
         let disputed = application
             .clone()
@@ -1148,6 +1442,100 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("\"state\":\"open\""));
         assert!(!text.contains("claim_submitted"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reconstruct_returns_settled_after_full_happy_path() {
+        use bitcoin::hashes::Hash;
+        let dir = std::env::temp_dir().join("ponthtlc-http-reconstruct");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let owner = pubkey(0x33);
+
+        let mut preimage = [0u8; 32];
+        preimage[0] = 0xAB;
+        let payment_hash = bitcoin::hashes::sha256::Hash::hash(&preimage);
+        let payment_hash_hex = hex::encode(payment_hash.to_byte_array());
+
+        let created = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/escrow/create",
+                &owner,
+                &format!("{{\"payment_hash\":\"{payment_hash_hex}\",\"amount_msat\":50000000}}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let id = created_json["id"].as_str().unwrap().to_string();
+        let bolt11 = created_json["bolt11_invoice"].as_str().unwrap().to_string();
+
+        let funded = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/escrow/{id}/fund"),
+                &pubkey(0x44),
+                &format!("{{\"bolt11\":\"{bolt11}\"}}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(funded.status(), StatusCode::OK);
+
+        let claimed = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/escrow/{id}/claim"),
+                &owner,
+                &format!("{{\"preimage\":\"{}\"}}", hex::encode(preimage)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+
+        let events_resp = application
+            .oneshot(json_request(
+                "GET",
+                &format!("/api/escrow/{id}/events"),
+                &owner,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(events_resp.status(), StatusCode::OK);
+        let events_body = to_bytes(events_resp.into_body(), usize::MAX).await.unwrap();
+        let events: Vec<NostrEvent> = serde_json::from_slice(&events_body).unwrap();
+
+        let root_event = events
+            .iter()
+            .find(|e| e.kind == ponthtlc_protocol::constants::KIND_ROOT)
+            .expect("root event in chain");
+        let root = ponthtlc_protocol::swap_v1::parse_root(root_event, true)
+            .expect("root parses");
+
+        let action_events: Vec<NostrEvent> = events
+            .iter()
+            .filter(|e| e.kind == ponthtlc_protocol::constants::KIND_ACTION)
+            .cloned()
+            .collect();
+
+        let state = ponthtlc_protocol::swap_v1::reconstruct(&root, &action_events, true);
+        eprintln!("reconstruct status: {:?}, chain len: {}, rejected: {}", state.status, state.chain.len(), state.rejected.len());
+        for r in &state.rejected {
+            eprintln!("  rejected: {} - {}", r.id, r.reason);
+        }
+        assert_eq!(
+            state.status,
+            ponthtlc_protocol::swap_v1::SwapStatus::Settled,
+            "reconstruct should return Settled after happy path"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

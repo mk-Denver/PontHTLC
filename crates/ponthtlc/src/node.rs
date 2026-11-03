@@ -191,14 +191,16 @@ impl Node {
     pub async fn shutdown(&self) {
         self.peer_manager.disconnect_all_peers();
         let _ = self.shutdown_tx.send(true);
-        if let Some(handle) = self.listener.lock().expect("listener mutex poisoned").take() {
+        let listener_handle = self.listener.lock().expect("listener mutex poisoned").take();
+        if let Some(handle) = listener_handle {
             let _ = handle.await;
         }
-        if let Some(handle) = self.chain_sync.lock().expect("chain sync mutex poisoned").take() {
+        let chain_sync_handle = self.chain_sync.lock().expect("chain sync mutex poisoned").take();
+        if let Some(handle) = chain_sync_handle {
             let _ = handle.await;
         }
-        if let Some(background) = self.background.lock().expect("background mutex poisoned").take()
-        {
+        let background = self.background.lock().expect("background mutex poisoned").take();
+        if let Some(background) = background {
             if let Err(err) = background.stop() {
                 eprintln!("[{}] channel manager persist failed: {err}", self.name);
             }
