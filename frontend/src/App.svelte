@@ -1,51 +1,36 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { loc, startRouter } from "./lib/router.svelte";
-  import { session } from "./lib/session.svelte";
-  import Landing from "./pages/Landing.svelte";
-  import Ready from "./pages/Ready.svelte";
-  import Shell from "./pages/Shell.svelte";
-  import Start from "./pages/Start.svelte";
-  import StartRole from "./pages/StartRole.svelte";
+  import { wallet } from "./lib/wallet.svelte";
+  import Chat from "./pages/flow/Chat.svelte";
+  import Desk from "./pages/flow/Desk.svelte";
+  import Me from "./pages/flow/Me.svelte";
+  import NewSwap from "./pages/flow/NewSwap.svelte";
+  import Swap from "./pages/flow/Swap.svelte";
+  import Wallet from "./pages/flow/Wallet.svelte";
 
-  onMount(() => {
-    const stop = startRouter();
-    if (session.role) {
-      session.boot();
-    }
-    return stop;
-  });
+  wallet.boot();
 
-  $effect(() => {
-    const fromRoute = loc.pathname.includes("arbitrator")
-      ? "arbitrator"
-      : loc.pathname.includes("seller")
-        ? "seller"
-        : loc.pathname.includes("buyer")
-          ? "buyer"
-          : "";
-    document.documentElement.dataset.role = session.role ?? fromRoute;
-  });
+  onMount(() => startRouter());
+
+  const path = $derived(loc.pathname);
+  const swapId = $derived(loc.parts[0] === "swap" ? loc.parts[1] : "");
 </script>
 
 <svelte:head>
   <title>PontHTLC</title>
 </svelte:head>
 
-{#if loc.pathname === "/"}
-  <Landing />
-{:else if loc.pathname === "/start"}
-  <Start />
-{:else if loc.pathname === "/start/buyer"}
-  <StartRole role="buyer" />
-{:else if loc.pathname === "/start/seller"}
-  <StartRole role="seller" />
-{:else if loc.pathname === "/start/arbitrator"}
-  <StartRole role="arbitrator" />
-{:else if loc.pathname === "/ready"}
-  <Ready />
-{:else if loc.pathname.startsWith("/app")}
-  <Shell />
+{#if path === "/swap/new"}
+  <NewSwap />
+{:else if swapId && loc.parts[2] === "chat"}
+  <Chat />
+{:else if swapId}
+  <Swap />
+{:else if path === "/me"}
+  <Me />
+{:else if path === "/desk"}
+  <Desk />
 {:else}
-  <Landing />
+  <Wallet />
 {/if}

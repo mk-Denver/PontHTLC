@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -27,7 +28,9 @@ use tokio::sync::broadcast;
 use crate::dual::DualNode;
 use crate::events::WireEvent;
 use crate::invoice::{self, payment_hash_bytes};
+use crate::lnurl;
 use crate::node::{ChannelSnapshot, Node};
+use crate::settlement;
 use crate::tenancy::{EscrowRecord, EscrowStore};
 
 const NOSTR_PUBKEY_HEADER: &str = "x-nostr-pubkey";
@@ -39,6 +42,12 @@ pub trait HoldNode: Send + Sync {
     fn claim(&self, preimage: [u8; 32], payment_hash: [u8; 32]) -> Result<(), String>;
     fn fail(&self, payment_hash: [u8; 32]) -> Result<(), String>;
     fn pay(&self, bolt11: &str) -> Result<[u8; 32], String>;
+    fn pay_buyer(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.pay(bolt11)
+    }
+    fn pay_seller(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.pay(bolt11)
+    }
     fn subscribe(&self) -> broadcast::Receiver<WireEvent>;
     fn node_pubkey(&self) -> String;
     fn buyer_pubkey(&self) -> String {
@@ -175,6 +184,14 @@ impl HoldNode for DualNode {
         self.seller.pay(bolt11)
     }
 
+    fn pay_buyer(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.buyer.pay(bolt11)
+    }
+
+    fn pay_seller(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.seller.pay(bolt11)
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.subscribe_merged()
     }
@@ -239,6 +256,7 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/channel/status", get(channel_status::<N>))
         .route("/api/node/info", get(node_info::<N>))
         .route("/api/node/channels", get(node_channels::<N>))
+        .route("/api/balance", get(balance::<N>))
         .route("/api/ws", get(ws_events::<N>))
         .with_state(state)
         .layer(middleware::from_fn(allow_browser))
@@ -276,6 +294,80 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Serialize)]
+struct BalanceResponse {
+    msat: u64,
+}
+
+async fn balance<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
+) -> Result<Json<BalanceResponse>, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    let msat = state.store.lock().expect("escrow store mutex poisoned").balance_of(&owner);
+    Ok(Json(BalanceResponse { msat }))
+}
+
+pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
+    let inflight = Arc::new(Mutex::new(HashSet::<String>::new()));
+    tokio::spawn(async move {
+        let mut rx = state.node.subscribe();
+        let mut retry = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                incoming = rx.recv() => {
+                    match incoming {
+                        Ok(event) if event.kind == "PaymentSent" || event.kind == "PaymentFailed" => {
+                            if let Some(hash) = event.payment_hash {
+                                let _ = payout_hash(&state, &inflight, &event.kind, &hash).await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = retry.tick() => {
+                    let owed = state.store.lock().expect("escrow store mutex poisoned").owed();
+                    for record in owed {
+                        let kind = if record.payout == "buyer" { "PaymentSent" } else { "PaymentFailed" };
+                        let _ = payout_hash(&state, &inflight, kind, &record.payment_hash).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn payout_hash<N: HoldNode>(
+    state: &AppState<N>, inflight: &Mutex<HashSet<String>>, kind: &str, payment_hash: &str,
+) -> Result<(), String> {
+    let plan = {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let record = store.by_payment_hash(payment_hash).ok_or_else(|| "escrow not found".to_string())?;
+        let plan = settlement::plan(&record, kind).ok_or_else(|| "no payout".to_string())?;
+        if !inflight.lock().expect("payout inflight poisoned").insert(plan.escrow_id.clone()) {
+            return Ok(());
+        }
+        if let Err(err) = store.credit_payout(&plan.escrow_id, plan.side) {
+            inflight.lock().expect("payout inflight poisoned").remove(&plan.escrow_id);
+            return Err(err);
+        }
+        plan
+    };
+    let result = async {
+        let invoice = lnurl::fetch_invoice(&plan.address, plan.amount_msat).await?;
+        if plan.side == "buyer" {
+            state.node.pay_buyer(&invoice)?;
+        } else {
+            state.node.pay_seller(&invoice)?;
+        }
+        state.store.lock().expect("escrow store mutex poisoned").settle_payout(&plan.escrow_id)
+    }
+    .await;
+    inflight.lock().expect("payout inflight poisoned").remove(&plan.escrow_id);
+    result
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
@@ -289,6 +381,8 @@ struct CreateRequest {
     fiat_amount: Option<String>,
     #[serde(default)]
     payment_channel: Option<String>,
+    #[serde(default)]
+    buyer_lightning_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +479,9 @@ async fn create_escrow<N: HoldNode>(
             protocol_status: "proposed".to_string(),
             root_id: Some(root_id.clone()),
             tip_id: Some(root_id.clone()),
+            amount_msat: body.amount_msat,
+            buyer_lightning_address: body.buyer_lightning_address.clone().unwrap_or_default(),
+            ..EscrowRecord::default()
         })
         .map_err(bad_request)?;
     {
@@ -436,6 +533,8 @@ async fn escrow_events<N: HoldNode>(
 #[serde(deny_unknown_fields)]
 struct PayRequest {
     bolt11: String,
+    #[serde(default)]
+    seller_lightning_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -483,6 +582,16 @@ async fn fund_escrow<N: HoldNode>(
         .lock()
         .expect("escrow store mutex poisoned")
         .record_outgoing(&payer, &payment_hash_hex)
+        .map_err(bad_request)?;
+    state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .set_seller_destination(
+            &id,
+            &payer,
+            body.seller_lightning_address.as_deref().unwrap_or(""),
+        )
         .map_err(bad_request)?;
     let accept_event = sign_and_store_action(&state, &id, "core/accept", None)
         .map_err(bad_request)?;
@@ -1097,6 +1206,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lightning_address_is_stored_and_withdraw_is_absent() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-ln-address");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let owner = pubkey(0x11);
+        let hash = "33".repeat(32);
+        let created = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/escrow/create",
+                &owner,
+                &format!(
+                    "{{\"payment_hash\":\"{hash}\",\"amount_msat\":50000,\"buyer_lightning_address\":\"buyer@example.com\"}}"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let id = created_json["id"].as_str().unwrap();
+        let fetched = application
+            .clone()
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &owner, ""))
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let fetched_body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let fetched_json: serde_json::Value = serde_json::from_slice(&fetched_body).unwrap();
+        assert_eq!(fetched_json["buyer_lightning_address"].as_str(), Some("buyer@example.com"));
+        assert_eq!(fetched_json["amount_msat"].as_u64(), Some(50_000));
+        let balance = application
+            .clone()
+            .oneshot(json_request("GET", "/api/balance", &owner, ""))
+            .await
+            .unwrap();
+        assert_eq!(balance.status(), StatusCode::OK);
+        let balance_body = to_bytes(balance.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&balance_body[..], br#"{"msat":0}"#);
+        let withdraw = application
+            .oneshot(json_request("POST", "/api/withdraw", &owner, "{}"))
+            .await
+            .unwrap();
+        assert_eq!(withdraw.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
