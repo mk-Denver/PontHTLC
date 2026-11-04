@@ -22,7 +22,7 @@ function fresh(): Saved {
 
 function load(): Saved {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = sessionStorage.getItem(KEY);
     if (raw) {
       const saved = JSON.parse(raw) as Saved;
       if (saved.secret && saved.pubkey) {
@@ -33,7 +33,7 @@ function load(): Saved {
     /* a broken saved wallet starts over */
   }
   const saved = fresh();
-  localStorage.setItem(KEY, JSON.stringify(saved));
+  sessionStorage.setItem(KEY, JSON.stringify(saved));
   return saved;
 }
 
@@ -54,7 +54,7 @@ export class WalletSession {
   }
 
   save() {
-    localStorage.setItem(
+    sessionStorage.setItem(
       KEY,
       JSON.stringify({
         secret: this.secret,
