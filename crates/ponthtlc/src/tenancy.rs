@@ -20,6 +20,36 @@ pub struct EscrowRecord {
     pub root_id: Option<String>,
     #[serde(default)]
     pub tip_id: Option<String>,
+    #[serde(default)]
+    pub amount_msat: u64,
+    #[serde(default)]
+    pub buyer_lightning_address: String,
+    #[serde(default)]
+    pub seller_lightning_address: String,
+    #[serde(default)]
+    pub seller_owner: String,
+    #[serde(default)]
+    pub payout: String,
+}
+
+impl Default for EscrowRecord {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            owner: String::new(),
+            payment_hash: String::new(),
+            state: String::new(),
+            bolt11: String::new(),
+            protocol_status: String::new(),
+            root_id: None,
+            tip_id: None,
+            amount_msat: 0,
+            buyer_lightning_address: String::new(),
+            seller_lightning_address: String::new(),
+            seller_owner: String::new(),
+            payout: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +66,13 @@ struct OutgoingPayment {
     payment_hash: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct BalanceEntry {
+    owner: String,
+    msat: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct DiskState {
@@ -45,6 +82,8 @@ struct DiskState {
     outgoing: Vec<OutgoingPayment>,
     #[serde(default)]
     event_chains: std::collections::HashMap<String, Vec<NostrEvent>>,
+    #[serde(default)]
+    balances: Vec<BalanceEntry>,
 }
 
 pub struct EscrowStore {
@@ -179,6 +218,123 @@ impl EscrowStore {
         self.persist()
     }
 
+    pub fn by_payment_hash(&self, payment_hash: &str) -> Option<EscrowRecord> {
+        self.state
+            .escrows
+            .iter()
+            .find(|record| record.payment_hash == payment_hash)
+            .cloned()
+    }
+
+    pub fn balance_of(&self, owner: &str) -> u64 {
+        self.state
+            .balances
+            .iter()
+            .find(|row| row.owner == owner)
+            .map(|row| row.msat)
+            .unwrap_or(0)
+    }
+
+    pub fn owed(&self) -> Vec<EscrowRecord> {
+        self.state
+            .escrows
+            .iter()
+            .filter(|record| record.payout == "buyer" || record.payout == "seller")
+            .cloned()
+            .collect()
+    }
+
+    pub fn set_seller_destination(
+        &mut self, id: &str, seller_owner: &str, address: &str,
+    ) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.seller_owner = seller_owner.to_string();
+        if !address.is_empty() {
+            record.seller_lightning_address = address.to_string();
+        }
+        self.persist()
+    }
+
+    pub fn credit_payout(&mut self, id: &str, side: &str) -> Result<bool, String> {
+        let (owner, amount) = {
+            let record = self
+                .state
+                .escrows
+                .iter_mut()
+                .find(|record| record.id == id)
+                .ok_or_else(|| "escrow not found".to_string())?;
+            if record.payout == "paid" || record.payout == side {
+                return Ok(false);
+            }
+            if !record.payout.is_empty() {
+                return Err("payout already assigned".to_string());
+            }
+            let owner = if side == "buyer" {
+                record.owner.clone()
+            } else if side == "seller" {
+                record.seller_owner.clone()
+            } else {
+                return Err("unknown payout side".to_string());
+            };
+            if owner.is_empty() || record.amount_msat == 0 {
+                return Ok(false);
+            }
+            let amount = record.amount_msat;
+            record.payout = side.to_string();
+            (owner, amount)
+        };
+        if let Some(row) = self.state.balances.iter_mut().find(|row| row.owner == owner) {
+            row.msat = row.msat.saturating_add(amount);
+        } else {
+            self.state.balances.push(BalanceEntry { owner, msat: amount });
+        }
+        self.persist()?;
+        Ok(true)
+    }
+
+    pub fn settle_payout(&mut self, id: &str) -> Result<(), String> {
+        let (owner, amount) = {
+            let record = self
+                .state
+                .escrows
+                .iter()
+                .find(|record| record.id == id)
+                .ok_or_else(|| "escrow not found".to_string())?;
+            if record.payout != "buyer" && record.payout != "seller" {
+                return Err("no owed payout".to_string());
+            }
+            let owner = if record.payout == "buyer" {
+                record.owner.clone()
+            } else {
+                record.seller_owner.clone()
+            };
+            (owner, record.amount_msat)
+        };
+        let row = self
+            .state
+            .balances
+            .iter_mut()
+            .find(|row| row.owner == owner)
+            .ok_or_else(|| "balance missing".to_string())?;
+        if row.msat < amount {
+            return Err("balance short".to_string());
+        }
+        row.msat -= amount;
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.payout = "paid".to_string();
+        self.persist()
+    }
+
     pub fn append_event(&mut self, escrow_id: &str, event: NostrEvent) -> Result<String, String> {
         let chain = self
             .state
@@ -282,6 +438,7 @@ mod tests {
                 protocol_status: String::new(),
                 root_id: None,
                 tip_id: None,
+                ..EscrowRecord::default()
             })
             .unwrap();
         store
@@ -294,6 +451,7 @@ mod tests {
                 protocol_status: String::new(),
                 root_id: None,
                 tip_id: None,
+                ..EscrowRecord::default()
             })
             .unwrap();
         store.assign_channel("owner-a", "chan-a").unwrap();
@@ -336,6 +494,42 @@ mod tests {
         let record = store.get_owned("escrow-old", "owner-a").unwrap();
         assert_eq!(record.bolt11, "");
         assert_eq!(record.state, "open");
+        assert_eq!(record.buyer_lightning_address, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owed_balance_survives_restart_until_payout() {
+        let dir = std::env::temp_dir().join(format!(
+            "ponthtlc-tenancy-balance-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("escrows.json");
+        let mut store = EscrowStore::open(&path).unwrap();
+        store
+            .insert(EscrowRecord {
+                id: "escrow-a".to_string(),
+                owner: "buyer".to_string(),
+                payment_hash: "aa".to_string(),
+                state: "open".to_string(),
+                amount_msat: 50_000,
+                seller_owner: "seller".to_string(),
+                seller_lightning_address: "seller@example.com".to_string(),
+                ..EscrowRecord::default()
+            })
+            .unwrap();
+        assert!(store.credit_payout("escrow-a", "seller").unwrap());
+        assert!(!store.credit_payout("escrow-a", "seller").unwrap());
+        assert_eq!(store.balance_of("seller"), 50_000);
+        drop(store);
+        let mut store = EscrowStore::open(&path).unwrap();
+        assert_eq!(store.balance_of("seller"), 50_000);
+        assert_eq!(store.owed().len(), 1);
+        store.settle_payout("escrow-a").unwrap();
+        assert_eq!(store.balance_of("seller"), 0);
+        assert_eq!(store.get("escrow-a").unwrap().payout, "paid");
         let _ = fs::remove_dir_all(&dir);
     }
 }

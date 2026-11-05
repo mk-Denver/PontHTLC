@@ -5,6 +5,10 @@ export type EscrowRecord = {
   state: string;
   bolt11: string;
   protocol_status: string;
+  amount_msat?: number;
+  buyer_lightning_address?: string;
+  seller_lightning_address?: string;
+  payout?: string;
 };
 
 export type WireEvent = {
@@ -98,11 +102,20 @@ export function createEscrow(
   pubkey: string,
   paymentHash: string,
   amountMsat: number,
+  buyerLightningAddress?: string,
 ): Promise<CreateResponse> {
   return request(pubkey, "/api/escrow/create", {
     method: "POST",
-    body: JSON.stringify({ payment_hash: paymentHash, amount_msat: amountMsat }),
+    body: JSON.stringify({
+      payment_hash: paymentHash,
+      amount_msat: amountMsat,
+      ...(buyerLightningAddress ? { buyer_lightning_address: buyerLightningAddress } : {}),
+    }),
   });
+}
+
+export function balance(pubkey: string): Promise<{ msat: number }> {
+  return request(pubkey, "/api/balance");
 }
 
 export function listEscrows(pubkey: string): Promise<EscrowRecord[]> {
@@ -113,10 +126,18 @@ export function getEscrow(pubkey: string, id: string): Promise<EscrowRecord> {
   return request(pubkey, `/api/escrow/${id}`);
 }
 
-export function fundEscrow(pubkey: string, id: string, bolt11: string): Promise<PayResponse> {
+export function fundEscrow(
+  pubkey: string,
+  id: string,
+  bolt11: string,
+  sellerLightningAddress?: string,
+): Promise<PayResponse> {
   return request(pubkey, `/api/escrow/${id}/fund`, {
     method: "POST",
-    body: JSON.stringify({ bolt11 }),
+    body: JSON.stringify({
+      bolt11,
+      ...(sellerLightningAddress ? { seller_lightning_address: sellerLightningAddress } : {}),
+    }),
   });
 }
 

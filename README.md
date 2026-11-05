@@ -114,7 +114,7 @@ One command starts bitcoind, the Nostr relay, the hosted daemon, and the fronten
 docker compose -f docker-compose.mvp.yml up --build
 ```
 
-`http://127.0.0.1:9800/health/live` returns `ok`. The escrow dashboard is at `http://127.0.0.1:5173`. Open that address in two browser tabs, one buyer and one seller. `make test-happy`, `make test-fail`, and `make test-hold` run the spike scenarios. `scripts/integration-test.sh` brings the stack up, checks health, then runs the relay, API, and restart tests.
+`http://127.0.0.1:9800/health/live` returns `ok`. The escrow dashboard is at `http://127.0.0.1:5173`. It is a phone-width flow: Wallet, New swap, the swap (Lock, Pay fiat, Confirm, Release), Chat, Me, and Desk. Create a swap with the buyer's Lightning address. The other person funds it and leaves their own Lightning address. Settled sats are paid to the buyer's address. A failed hold is paid to the seller's address. There is no withdraw button. `make test-happy`, `make test-fail`, and `make test-hold` run the spike scenarios. `scripts/integration-test.sh` brings the stack up, checks health, then runs the relay, API, and restart tests.
 
 ### Run the spike
 

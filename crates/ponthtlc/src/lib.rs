@@ -3,5 +3,7 @@ pub mod dual;
 pub mod events;
 pub mod http;
 pub mod invoice;
+pub mod lnurl;
 pub mod node;
+pub mod settlement;
 pub mod tenancy;
