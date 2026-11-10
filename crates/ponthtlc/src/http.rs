@@ -609,12 +609,12 @@ async fn list_escrows<N: HoldNode>(
 async fn get_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<Json<EscrowRecord>, (StatusCode, String)> {
-    let owner = owner_from_headers(&headers)?;
+    let _owner = owner_from_headers(&headers)?;
     let record = state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
-        .get_owned(&id, &owner)
+        .get(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     Ok(Json(record))
 }
@@ -622,12 +622,12 @@ async fn get_escrow<N: HoldNode>(
 async fn escrow_events<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<Json<Vec<NostrEvent>>, (StatusCode, String)> {
-    let owner = owner_from_headers(&headers)?;
+    let _owner = owner_from_headers(&headers)?;
     let _record = state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
-        .get_owned(&id, &owner)
+        .get(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     let events = state.store.lock().expect("escrow store mutex poisoned").get_events(&id);
     Ok(Json(events))
@@ -670,7 +670,9 @@ async fn fund_escrow<N: HoldNode>(
         let store = state.store.lock().expect("escrow store mutex poisoned");
         let parsed = invoice::parse_bolt11(&body.bolt11).map_err(bad_request)?;
         let ph = hex::encode(payment_hash_bytes(&parsed));
-        store.get_owned(&id, &payer).is_some()
+        store.get(&id)
+            .map(|r| r.owner == payer && r.payment_hash == ph)
+            .unwrap_or(false)
             || store.list(&payer).iter().any(|record| record.payment_hash == ph)
     };
     if owns_invoice {
