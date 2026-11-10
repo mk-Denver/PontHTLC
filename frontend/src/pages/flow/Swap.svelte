@@ -20,7 +20,7 @@
   let closeWs: (() => void) | null = null;
   let busy = $state(false);
 
-  const isAgent = $derived(wallet.isAgent);
+  const isAgent = $derived(wallet.isAgent || (row !== null && row.owner !== wallet.pubkey));
   const status = $derived(row?.protocol_status || "proposed");
 
   const steps = $derived.by(() => {
