@@ -257,6 +257,8 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/node/info", get(node_info::<N>))
         .route("/api/node/channels", get(node_channels::<N>))
         .route("/api/balance", get(balance::<N>))
+        .route("/api/offer/publish", post(publish_offer::<N>))
+        .route("/api/offers", get(list_offers::<N>))
         .route("/api/ws", get(ws_events::<N>))
         .with_state(state)
         .layer(middleware::from_fn(allow_browser))
@@ -305,6 +307,108 @@ async fn balance<N: HoldNode>(
     let owner = owner_from_headers(&headers)?;
     let msat = state.store.lock().expect("escrow store mutex poisoned").balance_of(&owner);
     Ok(Json(BalanceResponse { msat }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishOfferRequest {
+    currency: String,
+    direction: String,
+    price: String,
+    min_amount: String,
+    max_amount: String,
+    channels: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PublishOfferResponse {
+    event_id: String,
+}
+
+async fn publish_offer<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Json(body): Json<PublishOfferRequest>,
+) -> Result<Json<PublishOfferResponse>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let signer_pk = pubkey_from_secret(&state.nostr_secret);
+    let now = ponthtlc_protocol::event::now();
+    let direction = ponthtlc_protocol::swap_v1::Direction::from_str(&body.direction)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown direction: {}", body.direction)))?;
+    let escrow_pk = pubkey_for_role(&state.nostr_secret, "escrow");
+    let resolver_pk = pubkey_for_role(&state.nostr_secret, "resolver");
+    let input = ponthtlc_protocol::events::OfferInput {
+        signer_pubkey: signer_pk.clone(),
+        direction,
+        currency: body.currency.clone(),
+        price: body.price.clone(),
+        min: body.min_amount.clone(),
+        max: body.max_amount.clone(),
+        channels: body.channels.clone(),
+        channel_labels: body.channels.clone(),
+        network: "lightning".to_string(),
+        layer: "lightning".to_string(),
+        premium: "0".to_string(),
+        escrow: format!("30361:{}:lightning-hold-invoice", escrow_pk),
+        resolver: resolver_pk,
+        expires_at: now + 1800,
+        status: "pending".to_string(),
+        name: None,
+        source: None,
+    };
+    let template = ponthtlc_protocol::events::offer_template(&input);
+    let signed = ponthtlc_protocol::events::sign_event(template, &state.nostr_secret)
+        .map_err(bad_request)?;
+    let event_id = signed.id.clone();
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.append_event("__offers__", signed.clone());
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[signed]).await;
+    Ok(Json(PublishOfferResponse { event_id }))
+}
+
+#[derive(Serialize)]
+struct OfferSummary {
+    event_id: String,
+    currency: String,
+    direction: String,
+    price: String,
+    min_amount: String,
+    max_amount: String,
+    channels: Vec<String>,
+    expires_at: u64,
+    escrow_pubkey: String,
+}
+
+async fn list_offers<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
+) -> Result<Json<Vec<OfferSummary>>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let events = state.store.lock().expect("escrow store mutex poisoned").get_events("__offers__");
+    let now = ponthtlc_protocol::event::now();
+    let summaries: Vec<OfferSummary> = events
+        .into_iter()
+        .filter(|e| e.kind == ponthtlc_protocol::constants::KIND_OFFER)
+        .filter_map(|e| {
+            let offer = ponthtlc_protocol::offer::parse_offer(&e, false).ok()?;
+            let content = &offer.content;
+            if !ponthtlc_protocol::offer::is_offer_live(content, now) {
+                return None;
+            }
+            Some(OfferSummary {
+                event_id: e.id,
+                currency: content.currency.clone(),
+                direction: content.direction.as_str().to_string(),
+                price: content.price.clone(),
+                min_amount: content.min.clone(),
+                max_amount: content.max.clone(),
+                channels: content.channels.clone(),
+                expires_at: content.expires_at,
+                escrow_pubkey: ponthtlc_protocol::offer::escrow_pk_of(content).to_string(),
+            })
+        })
+        .collect();
+    Ok(Json(summaries))
 }
 
 pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {

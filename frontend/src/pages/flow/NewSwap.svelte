@@ -1,17 +1,38 @@
 <script lang="ts">
   import { sha256 } from "@noble/hashes/sha2.js";
   import * as api from "../../lib/api";
+  import type { OfferSummary } from "../../lib/api";
   import { bytesToHex } from "../../lib/hex";
   import { go } from "../../lib/router.svelte";
   import { splitPreimage } from "../../lib/shamir";
   import { wallet } from "../../lib/wallet.svelte";
   import Nav from "./Nav.svelte";
 
-  let sats = $state(50000);
-  let direction = $state<"buy" | "sell">("buy");
+  let offers = $state<OfferSummary[]>([]);
+  let selected = $state<OfferSummary | null>(null);
+  let fiatAmount = $state("");
   let address = $state(wallet.lightningAddress);
   let busy = $state(false);
   let error = $state("");
+  let loading = $state(true);
+
+  async function loadOffers() {
+    loading = true;
+    try {
+      offers = await api.listOffers(wallet.pubkey);
+      error = "";
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Could not load offers.";
+    } finally {
+      loading = false;
+    }
+  }
+
+  $effect(() => {
+    if (wallet.pubkey) {
+      void loadOffers();
+    }
+  });
 
   async function create() {
     error = "";
@@ -24,10 +45,13 @@
       const preimage = crypto.getRandomValues(new Uint8Array(32));
       const paymentHash = bytesToHex(sha256(preimage));
       const [buyer, seller, arbitrator] = splitPreimage(preimage);
+      const amountMsat = selected
+        ? Math.round(parseFloat(fiatAmount) / parseFloat(selected.price) * 100_000_000) * 1000
+        : 50_000_000;
       const created = await api.createEscrow(
         wallet.pubkey,
         paymentHash,
-        sats * 1000,
+        amountMsat,
         address,
       );
       const handoff = {
@@ -49,29 +73,40 @@
 
 <main class="flow">
   <p class="kicker">New swap</p>
-  <h1>Lock sats</h1>
+  <h1>Find an agent</h1>
 
-  <div style="display:flex;gap:8px">
-    <button
-      class="btn ghost"
-      style={direction === "buy" ? "border-color:var(--accent);color:var(--accent)" : ""}
-      onclick={() => (direction = "buy")}
-    >
-      Buy BTC
-    </button>
-    <button
-      class="btn ghost"
-      style={direction === "sell" ? "border-color:var(--accent);color:var(--accent)" : ""}
-      onclick={() => (direction = "sell")}
-    >
-      Sell BTC
-    </button>
-  </div>
+  {#if loading}
+    <p class="muted">Loading offers…</p>
+  {:else if offers.length === 0}
+    <p class="muted">No agents online. Ask an agent to publish an offer from the Desk tab.</p>
+    <button class="btn ghost" onclick={loadOffers}>Refresh</button>
+  {:else}
+    <ul class="swap-list">
+      {#each offers as offer}
+        <li>
+          <button
+            class="ticket"
+            style={selected?.event_id === offer.event_id ? "border-color: var(--accent)" : ""}
+            onclick={() => (selected = offer)}
+          >
+            <strong>{offer.currency} {offer.direction === "fiat_to_btc" ? "→ BTC" : "← BTC"}</strong>
+            <span class="muted">{offer.price} {offer.currency}/sat</span>
+            <span class="muted">{offer.min_amount}–{offer.max_amount} {offer.currency}</span>
+            <span class="muted">{offer.channels.join(", ")}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 
-  <label>
-    Amount (sats)
-    <input type="number" min="1000" bind:value={sats} />
-  </label>
+  {#if selected}
+    <p class="kicker" style="margin-top:10px">Selected: {selected.currency} {selected.direction === "fiat_to_btc" ? "→ BTC" : "← BTC"}</p>
+    <label>
+      Amount in {selected.currency}
+      <input type="number" bind:value={fiatAmount} placeholder={selected.min_amount} />
+    </label>
+  {/if}
+
   <label>
     Your Lightning address
     <input bind:value={address} placeholder="name@domain" autocomplete="off" />
@@ -80,8 +115,8 @@
   {#if error}
     <p class="warn">{error}</p>
   {/if}
-  <button class="btn" type="button" disabled={busy} onclick={create}>
-    {busy ? "Creating…" : "Create hold invoice"}
+  <button class="btn" type="button" disabled={busy || !address.includes("@")} onclick={create}>
+    {busy ? "Creating…" : "Create swap proposal"}
   </button>
   <Nav />
 </main>

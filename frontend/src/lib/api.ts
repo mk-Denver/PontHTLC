@@ -192,6 +192,44 @@ export function openChannel(
   });
 }
 
+export type OfferSummary = {
+  event_id: string;
+  currency: string;
+  direction: string;
+  price: string;
+  min_amount: string;
+  max_amount: string;
+  channels: string[];
+  expires_at: number;
+  escrow_pubkey: string;
+};
+
+export function publishOffer(
+  pubkey: string,
+  currency: string,
+  direction: string,
+  price: string,
+  minAmount: string,
+  maxAmount: string,
+  channels: string[],
+): Promise<{ event_id: string }> {
+  return request(pubkey, "/api/offer/publish", {
+    method: "POST",
+    body: JSON.stringify({
+      currency,
+      direction,
+      price,
+      min_amount: minAmount,
+      max_amount: maxAmount,
+      channels,
+    }),
+  });
+}
+
+export function listOffers(pubkey: string): Promise<OfferSummary[]> {
+  return request(pubkey, "/api/offers");
+}
+
 export function openEventStream(
   pubkey: string,
   onEvent: (event: WireEvent) => void,
