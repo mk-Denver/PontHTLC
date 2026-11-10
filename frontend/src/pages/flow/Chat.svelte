@@ -46,12 +46,12 @@
     {#each lines as line}
       <li>{line}</li>
     {:else}
-      <li class="muted">Say when the cash is sent, or paste a share the other person can copy.</li>
+      <li class="muted">Say when the cash is sent, or paste a share.</li>
     {/each}
   </ul>
   <label>
     Message
-    <textarea bind:value={draft} rows="3"></textarea>
+    <textarea bind:value={draft} rows="2" placeholder="Type a message..."></textarea>
   </label>
   <button class="btn" type="button" onclick={send}>Send</button>
   <a class="btn ghost" href="#/swap/{id}">Back to swap</a>

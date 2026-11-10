@@ -8,6 +8,7 @@
   import Nav from "./Nav.svelte";
 
   let sats = $state(50000);
+  let direction = $state<"buy" | "sell">("buy");
   let address = $state(wallet.lightningAddress);
   let busy = $state(false);
   let error = $state("");
@@ -23,7 +24,12 @@
       const preimage = crypto.getRandomValues(new Uint8Array(32));
       const paymentHash = bytesToHex(sha256(preimage));
       const [buyer, seller, arbitrator] = splitPreimage(preimage);
-      const created = await api.createEscrow(wallet.pubkey, paymentHash, sats * 1000, address);
+      const created = await api.createEscrow(
+        wallet.pubkey,
+        paymentHash,
+        sats * 1000,
+        address,
+      );
       const handoff = {
         mine: { x: buyer.x, hex: bytesToHex(buyer.bytes) },
         seller: { x: seller.x, hex: bytesToHex(seller.bytes) },
@@ -44,9 +50,27 @@
 <main class="flow">
   <p class="kicker">New swap</p>
   <h1>Lock sats</h1>
+
+  <div style="display:flex;gap:8px">
+    <button
+      class="btn ghost"
+      style={direction === "buy" ? "border-color:var(--accent);color:var(--accent)" : ""}
+      onclick={() => (direction = "buy")}
+    >
+      Buy BTC
+    </button>
+    <button
+      class="btn ghost"
+      style={direction === "sell" ? "border-color:var(--accent);color:var(--accent)" : ""}
+      onclick={() => (direction = "sell")}
+    >
+      Sell BTC
+    </button>
+  </div>
+
   <label>
     Amount (sats)
-    <input type="number" min="1" bind:value={sats} />
+    <input type="number" min="1000" bind:value={sats} />
   </label>
   <label>
     Your Lightning address

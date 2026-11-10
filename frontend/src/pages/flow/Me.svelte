@@ -11,6 +11,7 @@
     wallet.lightningAddress = address.trim();
     wallet.save();
     saved = true;
+    setTimeout(() => (saved = false), 2000);
   }
 </script>
 
@@ -19,7 +20,7 @@
   <h1>Your keys</h1>
   <label>
     Name
-    <input bind:value={name} />
+    <input bind:value={name} placeholder="Your display name" />
   </label>
   <label>
     Lightning address
@@ -27,7 +28,7 @@
   </label>
   <label>
     Nostr pubkey
-    <textarea readonly rows="3">{wallet.pubkey}</textarea>
+    <textarea readonly rows="2">{wallet.pubkey}</textarea>
   </label>
   <button class="btn" type="button" onclick={save}>Save</button>
   {#if saved}

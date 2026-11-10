@@ -46,16 +46,20 @@
   <p class="kicker">Desk</p>
   <h1>Operator</h1>
   <p class="muted">Block {height ?? "—"} · peers {status?.peers_connected ? "connected" : "quiet"}</p>
+
   <ul class="swap-list">
     {#each status?.channels ?? [] as channel}
       <li>
         <strong>{channel.channel_id.slice(0, 12)}</strong>
-        <span>{channel.usable ? "usable" : channel.ready ? "ready" : "opening"}</span>
+        <span class={`pill ${channel.usable ? "settled" : channel.ready ? "secured" : "proposed"}`}>
+          {channel.usable ? "usable" : channel.ready ? "ready" : "opening"}
+        </span>
       </li>
     {:else}
       <li class="muted">No channel yet. Open one, then mine confirmations on regtest.</li>
     {/each}
   </ul>
+
   <button class="btn" type="button" disabled={busy} onclick={openChannel}>
     {busy ? "Opening…" : "Open channel"}
   </button>

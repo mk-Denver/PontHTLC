@@ -1,7 +1,7 @@
 <script lang="ts">
   import { sha256 } from "@noble/hashes/sha2.js";
   import * as api from "../../lib/api";
-  import type { EscrowRecord } from "../../lib/api";
+  import type { EscrowRecord, WireEvent } from "../../lib/api";
   import { bytesToHex, hexToBytes } from "../../lib/hex";
   import { loc } from "../../lib/router.svelte";
   import { combineShares, type Share } from "../../lib/shamir";
@@ -18,6 +18,9 @@
   let sellerAddress = $state("");
   let pasted = $state("");
   let handoff = $state<{ mine: Piece; seller: Piece; arbitrator: Piece } | null>(null);
+  let events = $state<WireEvent[]>([]);
+  let showLog = $state(false);
+  let closeWs: (() => void) | null = null;
 
   const steps = $derived.by(() => {
     const status = row?.protocol_status || "proposed";
@@ -29,6 +32,8 @@
       { name: "Release", done: status === "settled" },
     ];
   });
+
+  const sharesReady = $derived(!!handoff && !!pasted);
 
   async function load() {
     if (!id) {
@@ -51,6 +56,16 @@
 
   $effect(() => {
     void load();
+    if (wallet.pubkey) {
+      closeWs?.();
+      closeWs = api.openEventStream(wallet.pubkey, (ev) => {
+        events = [...events, ev];
+        if (ev.kind === "PaymentSent" || ev.kind === "PaymentFailed") {
+          void load();
+        }
+      });
+    }
+    return () => closeWs?.();
   });
 
   function markFiat() {
@@ -85,7 +100,7 @@
         throw new Error("missing share");
       }
     } catch {
-      error = "Paste the other share as JSON: {\"x\":2,\"hex\":\"...\"}";
+      error = 'Paste the other share as JSON: {"x":2,"hex":"..."}';
       return;
     }
     try {
@@ -116,48 +131,78 @@
 <main class="flow">
   <p class="kicker">Swap</p>
   <h1>{id.slice(0, 8)}</h1>
-  <p class="badge">2 of 3 Shamir</p>
+  <p class="badge ok">2 of 3 Shamir {sharesReady ? "— ready" : ""}</p>
+
   <ol class="steps">
     {#each steps as step, index}
-      <li class:done={step.done}>{index + 1}. {step.name}</li>
+      <li class:done={step.done}>
+        <span class="dot">{step.done ? "✓" : index + 1}</span>
+        {step.name}
+      </li>
     {/each}
   </ol>
+
   {#if row}
-    <p class="muted">{row.protocol_status || row.state} · {(row.amount_msat ?? 0).toLocaleString()} msat</p>
+    <p class="muted">
+      <span class={`pill ${row.protocol_status || "proposed"}`}>{row.protocol_status || "proposed"}</span>
+      &nbsp;{(row.amount_msat ?? 0).toLocaleString()} msat
+    </p>
+
+    {#if row.protocol_status === "secured" || row.protocol_status === "accepted"}
+      <p class="badge ok" style="justify-self:start">Locked in your wallet</p>
+    {/if}
+
     {#if row.bolt11}
       <label>
         Hold invoice
-        <textarea readonly rows="4">{row.bolt11}</textarea>
+        <textarea readonly rows="3">{row.bolt11}</textarea>
       </label>
     {/if}
+
     {#if handoff}
       <label>
-        Seller share — send this, do not keep it as yours
-        <textarea readonly rows="3">{JSON.stringify(handoff.seller)}</textarea>
+        Seller share — send this
+        <div class="share-box">{JSON.stringify(handoff.seller)}</div>
       </label>
       <label>
         Arbitrator share
-        <textarea readonly rows="3">{JSON.stringify(handoff.arbitrator)}</textarea>
+        <div class="share-box">{JSON.stringify(handoff.arbitrator)}</div>
       </label>
     {/if}
-    <button class="btn ghost" type="button" onclick={markFiat}>I've paid the fiat</button>
+
+    <button class="btn ghost" type="button" onclick={markFiat} disabled={fiatPaid}>
+      {fiatPaid ? "Fiat marked paid" : "I've paid the fiat"}
+    </button>
+
     <label>
       Fund this invoice from the other side
-      <textarea bind:value={fundInvoice} rows="3" placeholder="bolt11"></textarea>
+      <textarea bind:value={fundInvoice} rows="2" placeholder="bolt11"></textarea>
     </label>
     <label>
       Seller Lightning address
       <input bind:value={sellerAddress} placeholder="seller@domain" />
     </label>
     <button class="btn ghost" type="button" onclick={fund}>Fund</button>
+
     <label>
       Paste a second share to release
-      <textarea bind:value={pasted} rows="3" placeholder={'{"x":2,"hex":"..."}'}></textarea>
+      <textarea bind:value={pasted} rows="2" placeholder="paste second share JSON"></textarea>
     </label>
-    <button class="btn" type="button" onclick={release}>Release</button>
+    <button class="btn" type="button" onclick={release} disabled={!sharesReady}>Release</button>
     <button class="btn danger" type="button" onclick={refund}>Refund</button>
+
     <a class="btn ghost" href="#/swap/{id}/chat">Chat</a>
+
+    <details class="event-log">
+      <summary>Event log ({events.length})</summary>
+      <ul>
+        {#each events as ev}
+          <li>{ev.kind} {ev.payment_hash ? ev.payment_hash.slice(0, 12) : ""}</li>
+        {/each}
+      </ul>
+    </details>
   {/if}
+
   {#if error}
     <p class="warn">{error}</p>
   {/if}

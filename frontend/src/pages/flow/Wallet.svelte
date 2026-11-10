@@ -34,23 +34,30 @@
     const sats = Math.round((row.amount_msat ?? 0) / 1000);
     return sats > 0 ? `${sats} sats` : row.id.slice(0, 8);
   }
+
+  function pillClass(status: string) {
+    if (!status) return "pill proposed";
+    return `pill ${status}`;
+  }
 </script>
 
 <main class="flow">
   <p class="kicker">PontHTLC</p>
   <h1>{wallet.name || "Wallet"}</h1>
-  <p class="balance">{msat.toLocaleString()} msat owed</p>
-  <p class="muted">Settled sats go to your Lightning address. There is no withdraw button.</p>
+  <p class="balance">{msat.toLocaleString()} msat</p>
+  <p class="muted">Settled sats go to your Lightning address automatically.</p>
   {#if note}
     <p class="warn">{note}</p>
   {/if}
   <a class="btn" href="#/swap/new">New swap</a>
+
+  <p class="kicker" style="margin-top:10px">Active swaps</p>
   <ul class="swap-list">
     {#each rows as row}
       <li>
         <a href="#/swap/{row.id}">
           <strong>{title(row)}</strong>
-          <span>{row.protocol_status || row.state}</span>
+          <span class={pillClass(row.protocol_status || row.state)}>{row.protocol_status || row.state}</span>
         </a>
       </li>
     {:else}

@@ -19,6 +19,8 @@
 
 <nav class="dock" aria-label="Main">
   {#each items as [href, label]}
-    <a href="#{href}" class:active={current(href)}>{label}</a>
+    <a href="#{href}" class:active={current(href)}>
+      {label}
+    </a>
   {/each}
 </nav>
