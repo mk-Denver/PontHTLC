@@ -72,7 +72,7 @@
       const paymentHash = bytesToHex(sha256(preimage));
       const [buyer, seller, arbitrator] = splitPreimage(preimage);
       const amountMsat = selected
-        ? Math.round(parseFloat(fiatAmount) / parseFloat(selected.price) * 100_000_000) * 1000
+        ? Math.round(parseFloat(fiatAmount) / parseFloat(selected.price)) * 1000
         : 50_000_000;
       const created = await api.createEscrow(
         wallet.pubkey,
