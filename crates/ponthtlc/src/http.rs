@@ -247,7 +247,11 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/:id", get(get_escrow::<N>))
         .route("/api/escrow/:id/events", get(escrow_events::<N>))
         .route("/api/escrow/:id/claim", post(claim_escrow::<N>))
+        .route("/api/escrow/:id/accept", post(accept_escrow::<N>))
+        .route("/api/escrow/:id/lock", post(lock_escrow::<N>))
         .route("/api/escrow/:id/fund", post(fund_escrow::<N>))
+        .route("/api/escrow/:id/fiat-sent", post(fiat_sent::<N>))
+        .route("/api/escrow/:id/fiat-confirmed", post(fiat_confirmed::<N>))
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
         .route("/api/escrow/:id/expire", post(expire_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
@@ -710,6 +714,131 @@ async fn fund_escrow<N: HoldNode>(
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[accept_event, secure_event]).await;
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
+}
+
+async fn accept_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "proposed" {
+                    return Err((StatusCode::CONFLICT, "escrow is not in proposed state".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let accept_event = sign_and_store_action(&state, &id, "core/accept", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "accepted");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[accept_event]).await;
+    Ok(StatusCode::OK)
+}
+
+async fn lock_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let bolt11 = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "accepted" {
+                    return Err((StatusCode::CONFLICT, "escrow must be accepted before locking".to_string()));
+                }
+                record.bolt11.clone()
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    };
+    if bolt11.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no hold invoice to lock".to_string()));
+    }
+    state.node.pay(&bolt11).map_err(bad_request)?;
+    let secure_event = sign_and_store_action(&state, &id, "core/secure", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "secured");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[secure_event]).await;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FiatSentRequest {
+    #[serde(default)]
+    payment_reference: Option<String>,
+}
+
+async fn fiat_sent<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<FiatSentRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "secured" {
+                    return Err((StatusCode::CONFLICT, "escrow must be secured before marking fiat sent".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let reference = body.payment_reference.unwrap_or_default();
+    let sent_event = sign_and_store_action(
+        &state,
+        &id,
+        "swap/fiat_sent",
+        Some(serde_json::json!({"payment_reference": reference})),
+    )
+    .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "fiat_sent");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[sent_event]).await;
+    Ok(StatusCode::OK)
+}
+
+async fn fiat_confirmed<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "fiat_sent" {
+                    return Err((StatusCode::CONFLICT, "escrow must have fiat_sent before confirming".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let confirmed_event = sign_and_store_action(&state, &id, "swap/fiat_confirmed", None)
+        .map_err(bad_request)?;
+    let auth_event = sign_and_store_action(&state, &id, "core/authorize_settlement", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "settlement_authorized");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[confirmed_event, auth_event]).await;
+    Ok(StatusCode::OK)
 }
 
 async fn fail_escrow<N: HoldNode>(

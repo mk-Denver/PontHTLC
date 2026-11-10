@@ -126,8 +126,7 @@ impl EscrowStore {
             .filter(|record| {
                 record.owner == owner
                     || record.seller_owner == owner
-                    || record.protocol_status == "proposed"
-                    || record.protocol_status == "secured"
+                    || !record.protocol_status.is_empty()
             })
             .cloned()
             .collect()

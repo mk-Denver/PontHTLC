@@ -47,6 +47,21 @@
 
   async function create() {
     error = "";
+    if (!selected) {
+      error = "Select an agent offer first.";
+      return;
+    }
+    if (!fiatAmount || parseFloat(fiatAmount) <= 0) {
+      error = "Enter a fiat amount.";
+      return;
+    }
+    const amt = parseFloat(fiatAmount);
+    const min = parseFloat(selected.min_amount);
+    const max = parseFloat(selected.max_amount);
+    if (amt < min || amt > max) {
+      error = `Amount must be between ${selected.min_amount} and ${selected.max_amount} ${selected.currency}.`;
+      return;
+    }
     if (!address.includes("@")) {
       error = "Add a Lightning address like name@domain.";
       return;
@@ -132,7 +147,7 @@
   {#if error}
     <p class="warn">{error}</p>
   {/if}
-  <button class="btn" type="button" disabled={busy || !address.includes("@")} onclick={create}>
+  <button class="btn" type="button" disabled={busy || !selected || !address.includes("@")} onclick={create}>
     {busy ? "Creating…" : "Create swap proposal"}
   </button>
   {/if}

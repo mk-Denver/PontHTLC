@@ -159,6 +159,25 @@ export function failEscrow(pubkey: string, id: string): Promise<void> {
   return request(pubkey, `/api/escrow/${id}/fail`, { method: "POST", body: "{}" });
 }
 
+export function acceptEscrow(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/accept`, { method: "POST", body: "{}" });
+}
+
+export function lockEscrow(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/lock`, { method: "POST", body: "{}" });
+}
+
+export function fiatSent(pubkey: string, id: string, reference?: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/fiat-sent`, {
+    method: "POST",
+    body: JSON.stringify({ payment_reference: reference ?? "" }),
+  });
+}
+
+export function fiatConfirmed(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/fiat-confirmed`, { method: "POST", body: "{}" });
+}
+
 export function disputeEscrow(
   pubkey: string,
   id: string,

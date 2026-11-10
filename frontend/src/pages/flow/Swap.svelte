@@ -14,31 +14,27 @@
   let row = $state<EscrowRecord | null>(null);
   let error = $state("");
   let fiatPaid = $state(false);
-  let fundInvoice = $state("");
-  let sellerAddress = $state("");
   let pasted = $state("");
   let handoff = $state<{ mine: Piece; seller: Piece; arbitrator: Piece } | null>(null);
   let events = $state<WireEvent[]>([]);
-  let showLog = $state(false);
   let closeWs: (() => void) | null = null;
+  let busy = $state(false);
+
+  const isAgent = $derived(wallet.isAgent);
+  const status = $derived(row?.protocol_status || "proposed");
 
   const steps = $derived.by(() => {
-    const status = row?.protocol_status || "proposed";
     const released = status === "settled" || status === "refunded";
     return [
       { name: "Lock", done: status !== "proposed" && status !== "" },
       { name: "Pay fiat", done: fiatPaid || released },
-      { name: "Confirm", done: released },
+      { name: "Confirm", done: status === "settlement_authorized" || released },
       { name: "Release", done: status === "settled" },
     ];
   });
 
-  const sharesReady = $derived(!!handoff && !!pasted);
-
   async function load() {
-    if (!id) {
-      return;
-    }
+    if (!id) return;
     fiatPaid = localStorage.getItem(`ponthtlc.fiat.${id}`) === "1";
     const raw = sessionStorage.getItem(`ponthtlc.share.${id}`);
     try {
@@ -60,31 +56,64 @@
       closeWs?.();
       closeWs = api.openEventStream(wallet.pubkey, (ev) => {
         events = [...events, ev];
-        if (ev.kind === "PaymentSent" || ev.kind === "PaymentFailed") {
-          void load();
-        }
+        void load();
       });
     }
-    return () => closeWs?.();
+    const interval = setInterval(() => {
+      if (row && row.protocol_status !== "settled" && row.protocol_status !== "refunded") {
+        void load();
+      }
+    }, 3000);
+    return () => {
+      closeWs?.();
+      clearInterval(interval);
+    };
   });
-
-  function markFiat() {
-    localStorage.setItem(`ponthtlc.fiat.${id}`, "1");
-    fiatPaid = true;
-  }
 
   function piece(raw: Piece): Share {
     return { x: raw.x, bytes: hexToBytes(raw.hex) };
   }
 
-  async function fund() {
-    error = "";
+  async function accept() {
+    busy = true; error = "";
     try {
-      await api.fundEscrow(wallet.pubkey, id, fundInvoice, sellerAddress);
+      await api.acceptEscrow(wallet.pubkey, id);
       await load();
     } catch (err) {
-      error = err instanceof Error ? err.message : "Funding failed.";
-    }
+      error = err instanceof Error ? err.message : "Accept failed.";
+    } finally { busy = false; }
+  }
+
+  async function lock() {
+    busy = true; error = "";
+    try {
+      await api.lockEscrow(wallet.pubkey, id);
+      await load();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Lock failed.";
+    } finally { busy = false; }
+  }
+
+  async function markFiatSent() {
+    busy = true; error = "";
+    try {
+      await api.fiatSent(wallet.pubkey, id, row?.payment_hash ?? "");
+      localStorage.setItem(`ponthtlc.fiat.${id}`, "1");
+      fiatPaid = true;
+      await load();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to mark fiat sent.";
+    } finally { busy = false; }
+  }
+
+  async function confirmFiat() {
+    busy = true; error = "";
+    try {
+      await api.fiatConfirmed(wallet.pubkey, id);
+      await load();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Confirm failed.";
+    } finally { busy = false; }
   }
 
   async function release() {
@@ -96,9 +125,7 @@
     let other: Piece;
     try {
       other = JSON.parse(pasted) as Piece;
-      if (!other.hex || !other.x) {
-        throw new Error("missing share");
-      }
+      if (!other.hex || !other.x) throw new Error("missing share");
     } catch {
       error = 'Paste the other share as JSON: {"x":2,"hex":"..."}';
       return;
@@ -118,20 +145,22 @@
   }
 
   async function refund() {
-    error = "";
+    busy = true; error = "";
     try {
       await api.failEscrow(wallet.pubkey, id);
       await load();
     } catch (err) {
       error = err instanceof Error ? err.message : "Refund failed.";
-    }
+    } finally { busy = false; }
   }
 </script>
 
 <main class="flow">
   <p class="kicker">Swap</p>
   <h1>{id.slice(0, 8)}</h1>
-  <p class="badge ok">2 of 3 Shamir {sharesReady ? "— ready" : ""}</p>
+  <p class="badge" class:ok={status === "settled"} class:warn={status === "refunded" || status === "disputed"}>
+    {status} · {isAgent ? "Agent" : "Buyer"}
+  </p>
 
   <ol class="steps">
     {#each steps as step, index}
@@ -144,19 +173,12 @@
 
   {#if row}
     <p class="muted">
-      <span class={`pill ${row.protocol_status || "proposed"}`}>{row.protocol_status || "proposed"}</span>
+      <span class={`pill ${status}`}>{status}</span>
       &nbsp;{(row.amount_msat ?? 0).toLocaleString()} msat
     </p>
 
-    {#if row.protocol_status === "secured" || row.protocol_status === "accepted"}
-      <p class="badge ok" style="justify-self:start">Locked in your wallet</p>
-    {/if}
-
-    {#if row.bolt11}
-      <label>
-        Hold invoice
-        <textarea readonly rows="3">{row.bolt11}</textarea>
-      </label>
+    {#if status === "secured" || status === "accepted"}
+      <p class="badge ok" style="justify-self:start">Locked in wallet</p>
     {/if}
 
     {#if handoff}
@@ -170,26 +192,46 @@
       </label>
     {/if}
 
-    <button class="btn ghost" type="button" onclick={markFiat} disabled={fiatPaid}>
-      {fiatPaid ? "Fiat marked paid" : "I've paid the fiat"}
-    </button>
+    {#if row.bolt11}
+      <label>
+        Hold invoice
+        <textarea readonly rows="2">{row.bolt11}</textarea>
+      </label>
+    {/if}
 
-    <label>
-      Fund this invoice from the other side
-      <textarea bind:value={fundInvoice} rows="2" placeholder="bolt11"></textarea>
-    </label>
-    <label>
-      Seller Lightning address
-      <input bind:value={sellerAddress} placeholder="seller@domain" />
-    </label>
-    <button class="btn ghost" type="button" onclick={fund}>Fund</button>
+    <!-- Agent actions -->
+    {#if isAgent}
+      {#if status === "proposed"}
+        <button class="btn" disabled={busy} onclick={accept}>Accept swap</button>
+      {/if}
+      {#if status === "accepted"}
+        <button class="btn" disabled={busy} onclick={lock}>Lock sats</button>
+      {/if}
+      {#if status === "fiat_sent"}
+        <button class="btn" disabled={busy} onclick={confirmFiat}>Confirm fiat received</button>
+      {/if}
+    {/if}
 
-    <label>
-      Paste a second share to release
-      <textarea bind:value={pasted} rows="2" placeholder="paste second share JSON"></textarea>
-    </label>
-    <button class="btn" type="button" onclick={release} disabled={!sharesReady}>Release</button>
-    <button class="btn danger" type="button" onclick={refund}>Refund</button>
+    <!-- Buyer actions -->
+    {#if !isAgent}
+      {#if status === "secured"}
+        <button class="btn ghost" disabled={busy || fiatPaid} onclick={markFiatSent}>
+          {fiatPaid ? "Fiat marked paid" : "I've paid the fiat"}
+        </button>
+      {/if}
+      {#if status === "settlement_authorized"}
+        <label>
+          Paste agent's share to release
+          <textarea bind:value={pasted} rows="2" placeholder="paste second share JSON"></textarea>
+        </label>
+        <button class="btn" disabled={busy} onclick={release}>Claim sats</button>
+      {/if}
+    {/if}
+
+    <!-- Both -->
+    {#if status === "secured"}
+      <button class="btn danger" disabled={busy} onclick={refund}>Refund</button>
+    {/if}
 
     <a class="btn ghost" href="#/swap/{id}/chat">Chat</a>
 
