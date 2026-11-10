@@ -5,6 +5,10 @@ export type EscrowRecord = {
   state: string;
   bolt11: string;
   protocol_status: string;
+  amount_msat?: number;
+  buyer_lightning_address?: string;
+  seller_lightning_address?: string;
+  payout?: string;
 };
 
 export type WireEvent = {
@@ -98,11 +102,20 @@ export function createEscrow(
   pubkey: string,
   paymentHash: string,
   amountMsat: number,
+  buyerLightningAddress?: string,
 ): Promise<CreateResponse> {
   return request(pubkey, "/api/escrow/create", {
     method: "POST",
-    body: JSON.stringify({ payment_hash: paymentHash, amount_msat: amountMsat }),
+    body: JSON.stringify({
+      payment_hash: paymentHash,
+      amount_msat: amountMsat,
+      ...(buyerLightningAddress ? { buyer_lightning_address: buyerLightningAddress } : {}),
+    }),
   });
+}
+
+export function balance(pubkey: string): Promise<{ msat: number }> {
+  return request(pubkey, "/api/balance");
 }
 
 export function listEscrows(pubkey: string): Promise<EscrowRecord[]> {
@@ -113,10 +126,18 @@ export function getEscrow(pubkey: string, id: string): Promise<EscrowRecord> {
   return request(pubkey, `/api/escrow/${id}`);
 }
 
-export function fundEscrow(pubkey: string, id: string, bolt11: string): Promise<PayResponse> {
+export function fundEscrow(
+  pubkey: string,
+  id: string,
+  bolt11: string,
+  sellerLightningAddress?: string,
+): Promise<PayResponse> {
   return request(pubkey, `/api/escrow/${id}/fund`, {
     method: "POST",
-    body: JSON.stringify({ bolt11 }),
+    body: JSON.stringify({
+      bolt11,
+      ...(sellerLightningAddress ? { seller_lightning_address: sellerLightningAddress } : {}),
+    }),
   });
 }
 
@@ -136,6 +157,25 @@ export function claimEscrow(pubkey: string, id: string, preimage: string): Promi
 
 export function failEscrow(pubkey: string, id: string): Promise<void> {
   return request(pubkey, `/api/escrow/${id}/fail`, { method: "POST", body: "{}" });
+}
+
+export function acceptEscrow(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/accept`, { method: "POST", body: "{}" });
+}
+
+export function lockEscrow(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/lock`, { method: "POST", body: "{}" });
+}
+
+export function fiatSent(pubkey: string, id: string, reference?: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/fiat-sent`, {
+    method: "POST",
+    body: JSON.stringify({ payment_reference: reference ?? "" }),
+  });
+}
+
+export function fiatConfirmed(pubkey: string, id: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/fiat-confirmed`, { method: "POST", body: "{}" });
 }
 
 export function disputeEscrow(
@@ -169,6 +209,44 @@ export function openChannel(
     method: "POST",
     body: JSON.stringify({ capacity_satoshis: capacitySatoshis }),
   });
+}
+
+export type OfferSummary = {
+  event_id: string;
+  currency: string;
+  direction: string;
+  price: string;
+  min_amount: string;
+  max_amount: string;
+  channels: string[];
+  expires_at: number;
+  escrow_pubkey: string;
+};
+
+export function publishOffer(
+  pubkey: string,
+  currency: string,
+  direction: string,
+  price: string,
+  minAmount: string,
+  maxAmount: string,
+  channels: string[],
+): Promise<{ event_id: string }> {
+  return request(pubkey, "/api/offer/publish", {
+    method: "POST",
+    body: JSON.stringify({
+      currency,
+      direction,
+      price,
+      min_amount: minAmount,
+      max_amount: maxAmount,
+      channels,
+    }),
+  });
+}
+
+export function listOffers(pubkey: string): Promise<OfferSummary[]> {
+  return request(pubkey, "/api/offers");
 }
 
 export function openEventStream(

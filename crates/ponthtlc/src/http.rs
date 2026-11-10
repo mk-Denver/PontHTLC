@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -27,7 +28,9 @@ use tokio::sync::broadcast;
 use crate::dual::DualNode;
 use crate::events::WireEvent;
 use crate::invoice::{self, payment_hash_bytes};
+use crate::lnurl;
 use crate::node::{ChannelSnapshot, Node};
+use crate::settlement;
 use crate::tenancy::{EscrowRecord, EscrowStore};
 
 const NOSTR_PUBKEY_HEADER: &str = "x-nostr-pubkey";
@@ -39,6 +42,12 @@ pub trait HoldNode: Send + Sync {
     fn claim(&self, preimage: [u8; 32], payment_hash: [u8; 32]) -> Result<(), String>;
     fn fail(&self, payment_hash: [u8; 32]) -> Result<(), String>;
     fn pay(&self, bolt11: &str) -> Result<[u8; 32], String>;
+    fn pay_buyer(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.pay(bolt11)
+    }
+    fn pay_seller(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.pay(bolt11)
+    }
     fn subscribe(&self) -> broadcast::Receiver<WireEvent>;
     fn node_pubkey(&self) -> String;
     fn buyer_pubkey(&self) -> String {
@@ -175,6 +184,14 @@ impl HoldNode for DualNode {
         self.seller.pay(bolt11)
     }
 
+    fn pay_buyer(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.buyer.pay(bolt11)
+    }
+
+    fn pay_seller(&self, bolt11: &str) -> Result<[u8; 32], String> {
+        self.seller.pay(bolt11)
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.subscribe_merged()
     }
@@ -230,7 +247,11 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/:id", get(get_escrow::<N>))
         .route("/api/escrow/:id/events", get(escrow_events::<N>))
         .route("/api/escrow/:id/claim", post(claim_escrow::<N>))
+        .route("/api/escrow/:id/accept", post(accept_escrow::<N>))
+        .route("/api/escrow/:id/lock", post(lock_escrow::<N>))
         .route("/api/escrow/:id/fund", post(fund_escrow::<N>))
+        .route("/api/escrow/:id/fiat-sent", post(fiat_sent::<N>))
+        .route("/api/escrow/:id/fiat-confirmed", post(fiat_confirmed::<N>))
         .route("/api/escrow/:id/fail", post(fail_escrow::<N>))
         .route("/api/escrow/:id/expire", post(expire_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
@@ -239,6 +260,9 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/channel/status", get(channel_status::<N>))
         .route("/api/node/info", get(node_info::<N>))
         .route("/api/node/channels", get(node_channels::<N>))
+        .route("/api/balance", get(balance::<N>))
+        .route("/api/offer/publish", post(publish_offer::<N>))
+        .route("/api/offers", get(list_offers::<N>))
         .route("/api/ws", get(ws_events::<N>))
         .with_state(state)
         .layer(middleware::from_fn(allow_browser))
@@ -276,6 +300,182 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Serialize)]
+struct BalanceResponse {
+    msat: u64,
+}
+
+async fn balance<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
+) -> Result<Json<BalanceResponse>, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    let msat = state.store.lock().expect("escrow store mutex poisoned").balance_of(&owner);
+    Ok(Json(BalanceResponse { msat }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishOfferRequest {
+    currency: String,
+    direction: String,
+    price: String,
+    min_amount: String,
+    max_amount: String,
+    channels: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PublishOfferResponse {
+    event_id: String,
+}
+
+async fn publish_offer<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Json(body): Json<PublishOfferRequest>,
+) -> Result<Json<PublishOfferResponse>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let signer_pk = pubkey_from_secret(&state.nostr_secret);
+    let now = ponthtlc_protocol::event::now();
+    let direction = ponthtlc_protocol::swap_v1::Direction::from_str(&body.direction)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown direction: {}", body.direction)))?;
+    let escrow_pk = pubkey_for_role(&state.nostr_secret, "escrow");
+    let resolver_pk = pubkey_for_role(&state.nostr_secret, "resolver");
+    let input = ponthtlc_protocol::events::OfferInput {
+        signer_pubkey: signer_pk.clone(),
+        direction,
+        currency: body.currency.clone(),
+        price: body.price.clone(),
+        min: body.min_amount.clone(),
+        max: body.max_amount.clone(),
+        channels: body.channels.clone(),
+        channel_labels: body.channels.clone(),
+        network: "lightning".to_string(),
+        layer: "lightning".to_string(),
+        premium: "0".to_string(),
+        escrow: format!("30361:{}:lightning-hold-invoice", escrow_pk),
+        resolver: resolver_pk,
+        expires_at: now + 1800,
+        status: "pending".to_string(),
+        name: None,
+        source: None,
+    };
+    let template = ponthtlc_protocol::events::offer_template(&input);
+    let signed = ponthtlc_protocol::events::sign_event(template, &state.nostr_secret)
+        .map_err(bad_request)?;
+    let event_id = signed.id.clone();
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.append_event("__offers__", signed.clone());
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[signed]).await;
+    Ok(Json(PublishOfferResponse { event_id }))
+}
+
+#[derive(Serialize)]
+struct OfferSummary {
+    event_id: String,
+    currency: String,
+    direction: String,
+    price: String,
+    min_amount: String,
+    max_amount: String,
+    channels: Vec<String>,
+    expires_at: u64,
+    escrow_pubkey: String,
+}
+
+async fn list_offers<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
+) -> Result<Json<Vec<OfferSummary>>, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let events = state.store.lock().expect("escrow store mutex poisoned").get_events("__offers__");
+    let now = ponthtlc_protocol::event::now();
+    let summaries: Vec<OfferSummary> = events
+        .into_iter()
+        .filter(|e| e.kind == ponthtlc_protocol::constants::KIND_OFFER)
+        .filter_map(|e| {
+            let offer = ponthtlc_protocol::offer::parse_offer(&e, false).ok()?;
+            let content = &offer.content;
+            if !ponthtlc_protocol::offer::is_offer_live(content, now) {
+                return None;
+            }
+            Some(OfferSummary {
+                event_id: e.id,
+                currency: content.currency.clone(),
+                direction: content.direction.as_str().to_string(),
+                price: content.price.clone(),
+                min_amount: content.min.clone(),
+                max_amount: content.max.clone(),
+                channels: content.channels.clone(),
+                expires_at: content.expires_at,
+                escrow_pubkey: ponthtlc_protocol::offer::escrow_pk_of(content).to_string(),
+            })
+        })
+        .collect();
+    Ok(Json(summaries))
+}
+
+pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
+    let inflight = Arc::new(Mutex::new(HashSet::<String>::new()));
+    tokio::spawn(async move {
+        let mut rx = state.node.subscribe();
+        let mut retry = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                incoming = rx.recv() => {
+                    match incoming {
+                        Ok(event) if event.kind == "PaymentSent" || event.kind == "PaymentFailed" => {
+                            if let Some(hash) = event.payment_hash {
+                                let _ = payout_hash(&state, &inflight, &event.kind, &hash).await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = retry.tick() => {
+                    let owed = state.store.lock().expect("escrow store mutex poisoned").owed();
+                    for record in owed {
+                        let kind = if record.payout == "buyer" { "PaymentSent" } else { "PaymentFailed" };
+                        let _ = payout_hash(&state, &inflight, kind, &record.payment_hash).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn payout_hash<N: HoldNode>(
+    state: &AppState<N>, inflight: &Mutex<HashSet<String>>, kind: &str, payment_hash: &str,
+) -> Result<(), String> {
+    let plan = {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let record = store.by_payment_hash(payment_hash).ok_or_else(|| "escrow not found".to_string())?;
+        let plan = settlement::plan(&record, kind).ok_or_else(|| "no payout".to_string())?;
+        if !inflight.lock().expect("payout inflight poisoned").insert(plan.escrow_id.clone()) {
+            return Ok(());
+        }
+        if let Err(err) = store.credit_payout(&plan.escrow_id, plan.side) {
+            inflight.lock().expect("payout inflight poisoned").remove(&plan.escrow_id);
+            return Err(err);
+        }
+        plan
+    };
+    let result = async {
+        let invoice = lnurl::fetch_invoice(&plan.address, plan.amount_msat).await?;
+        if plan.side == "buyer" {
+            state.node.pay_buyer(&invoice)?;
+        } else {
+            state.node.pay_seller(&invoice)?;
+        }
+        state.store.lock().expect("escrow store mutex poisoned").settle_payout(&plan.escrow_id)
+    }
+    .await;
+    inflight.lock().expect("payout inflight poisoned").remove(&plan.escrow_id);
+    result
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
@@ -289,6 +489,8 @@ struct CreateRequest {
     fiat_amount: Option<String>,
     #[serde(default)]
     payment_channel: Option<String>,
+    #[serde(default)]
+    buyer_lightning_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +587,9 @@ async fn create_escrow<N: HoldNode>(
             protocol_status: "proposed".to_string(),
             root_id: Some(root_id.clone()),
             tip_id: Some(root_id.clone()),
+            amount_msat: body.amount_msat,
+            buyer_lightning_address: body.buyer_lightning_address.clone().unwrap_or_default(),
+            ..EscrowRecord::default()
         })
         .map_err(bad_request)?;
     {
@@ -401,19 +606,19 @@ async fn list_escrows<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
 ) -> Result<Json<Vec<EscrowRecord>>, (StatusCode, String)> {
     let owner = owner_from_headers(&headers)?;
-    let records = state.store.lock().expect("escrow store mutex poisoned").list(&owner);
+    let records = state.store.lock().expect("escrow store mutex poisoned").list_visible(&owner);
     Ok(Json(records))
 }
 
 async fn get_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<Json<EscrowRecord>, (StatusCode, String)> {
-    let owner = owner_from_headers(&headers)?;
+    let _owner = owner_from_headers(&headers)?;
     let record = state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
-        .get_owned(&id, &owner)
+        .get(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     Ok(Json(record))
 }
@@ -421,12 +626,12 @@ async fn get_escrow<N: HoldNode>(
 async fn escrow_events<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<Json<Vec<NostrEvent>>, (StatusCode, String)> {
-    let owner = owner_from_headers(&headers)?;
+    let _owner = owner_from_headers(&headers)?;
     let _record = state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
-        .get_owned(&id, &owner)
+        .get(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
     let events = state.store.lock().expect("escrow store mutex poisoned").get_events(&id);
     Ok(Json(events))
@@ -436,6 +641,8 @@ async fn escrow_events<N: HoldNode>(
 #[serde(deny_unknown_fields)]
 struct PayRequest {
     bolt11: String,
+    #[serde(default)]
+    seller_lightning_address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -467,7 +674,9 @@ async fn fund_escrow<N: HoldNode>(
         let store = state.store.lock().expect("escrow store mutex poisoned");
         let parsed = invoice::parse_bolt11(&body.bolt11).map_err(bad_request)?;
         let ph = hex::encode(payment_hash_bytes(&parsed));
-        store.get_owned(&id, &payer).is_some()
+        store.get(&id)
+            .map(|r| r.owner == payer && r.payment_hash == ph)
+            .unwrap_or(false)
             || store.list(&payer).iter().any(|record| record.payment_hash == ph)
     };
     if owns_invoice {
@@ -484,6 +693,16 @@ async fn fund_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .record_outgoing(&payer, &payment_hash_hex)
         .map_err(bad_request)?;
+    state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .set_seller_destination(
+            &id,
+            &payer,
+            body.seller_lightning_address.as_deref().unwrap_or(""),
+        )
+        .map_err(bad_request)?;
     let accept_event = sign_and_store_action(&state, &id, "core/accept", None)
         .map_err(bad_request)?;
     let secure_event = sign_and_store_action(&state, &id, "core/secure", None)
@@ -495,6 +714,131 @@ async fn fund_escrow<N: HoldNode>(
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[accept_event, secure_event]).await;
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
+}
+
+async fn accept_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "proposed" {
+                    return Err((StatusCode::CONFLICT, "escrow is not in proposed state".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let accept_event = sign_and_store_action(&state, &id, "core/accept", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "accepted");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[accept_event]).await;
+    Ok(StatusCode::OK)
+}
+
+async fn lock_escrow<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    let bolt11 = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "accepted" {
+                    return Err((StatusCode::CONFLICT, "escrow must be accepted before locking".to_string()));
+                }
+                record.bolt11.clone()
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    };
+    if bolt11.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no hold invoice to lock".to_string()));
+    }
+    state.node.pay(&bolt11).map_err(bad_request)?;
+    let secure_event = sign_and_store_action(&state, &id, "core/secure", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "secured");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[secure_event]).await;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FiatSentRequest {
+    #[serde(default)]
+    payment_reference: Option<String>,
+}
+
+async fn fiat_sent<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<FiatSentRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "secured" {
+                    return Err((StatusCode::CONFLICT, "escrow must be secured before marking fiat sent".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let reference = body.payment_reference.unwrap_or_default();
+    let sent_event = sign_and_store_action(
+        &state,
+        &id,
+        "swap/fiat_sent",
+        Some(serde_json::json!({"payment_reference": reference})),
+    )
+    .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "fiat_sent");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[sent_event]).await;
+    Ok(StatusCode::OK)
+}
+
+async fn fiat_confirmed<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get(&id) {
+            Some(record) => {
+                if record.protocol_status != "fiat_sent" {
+                    return Err((StatusCode::CONFLICT, "escrow must have fiat_sent before confirming".to_string()));
+                }
+            },
+            None => return Err((StatusCode::NOT_FOUND, "escrow not found".to_string())),
+        }
+    }
+    let confirmed_event = sign_and_store_action(&state, &id, "swap/fiat_confirmed", None)
+        .map_err(bad_request)?;
+    let auth_event = sign_and_store_action(&state, &id, "core/authorize_settlement", None)
+        .map_err(bad_request)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "settlement_authorized");
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, &[confirmed_event, auth_event]).await;
+    Ok(StatusCode::OK)
 }
 
 async fn fail_escrow<N: HoldNode>(
@@ -1097,6 +1441,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lightning_address_is_stored_and_withdraw_is_absent() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-ln-address");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let owner = pubkey(0x11);
+        let hash = "33".repeat(32);
+        let created = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/escrow/create",
+                &owner,
+                &format!(
+                    "{{\"payment_hash\":\"{hash}\",\"amount_msat\":50000,\"buyer_lightning_address\":\"buyer@example.com\"}}"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let id = created_json["id"].as_str().unwrap();
+        let fetched = application
+            .clone()
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &owner, ""))
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let fetched_body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let fetched_json: serde_json::Value = serde_json::from_slice(&fetched_body).unwrap();
+        assert_eq!(fetched_json["buyer_lightning_address"].as_str(), Some("buyer@example.com"));
+        assert_eq!(fetched_json["amount_msat"].as_u64(), Some(50_000));
+        let balance = application
+            .clone()
+            .oneshot(json_request("GET", "/api/balance", &owner, ""))
+            .await
+            .unwrap();
+        assert_eq!(balance.status(), StatusCode::OK);
+        let balance_body = to_bytes(balance.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&balance_body[..], br#"{"msat":0}"#);
+        let withdraw = application
+            .oneshot(json_request("POST", "/api/withdraw", &owner, "{}"))
+            .await
+            .unwrap();
+        assert_eq!(withdraw.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

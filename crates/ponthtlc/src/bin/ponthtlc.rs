@@ -58,6 +58,7 @@ async fn main() {
     let nostr_secret = load_or_create_nostr_secret(&data_dir);
     let relay_url = cfg.relay_url.clone();
     let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret, relay_url: Some(relay_url) });
+    ponthtlc::http::spawn_auto_payout(Arc::clone(&state));
     let app = router(state);
     let addr = SocketAddr::from((cfg.bind, cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
