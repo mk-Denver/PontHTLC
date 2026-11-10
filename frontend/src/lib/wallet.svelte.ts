@@ -8,6 +8,7 @@ type Saved = {
   pubkey: string;
   name: string;
   lightningAddress: string;
+  isAgent: boolean;
 };
 
 function fresh(): Saved {
@@ -17,6 +18,7 @@ function fresh(): Saved {
     pubkey: keys.pubkey,
     name: "",
     lightningAddress: "",
+    isAgent: false,
   };
 }
 
@@ -42,6 +44,7 @@ export class WalletSession {
   pubkey = $state("");
   name = $state("");
   lightningAddress = $state("");
+  isAgent = $state(false);
   ready = $state(false);
 
   boot() {
@@ -50,6 +53,7 @@ export class WalletSession {
     this.pubkey = saved.pubkey;
     this.name = saved.name;
     this.lightningAddress = saved.lightningAddress;
+    this.isAgent = saved.isAgent;
     this.ready = true;
   }
 
@@ -61,8 +65,14 @@ export class WalletSession {
         pubkey: this.pubkey,
         name: this.name,
         lightningAddress: this.lightningAddress,
+        isAgent: this.isAgent,
       }),
     );
+  }
+
+  toggleAgent() {
+    this.isAgent = !this.isAgent;
+    this.save();
   }
 }
 

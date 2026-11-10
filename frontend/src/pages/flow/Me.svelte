@@ -13,11 +13,33 @@
     saved = true;
     setTimeout(() => (saved = false), 2000);
   }
+
+  function toggleMode() {
+    wallet.toggleAgent();
+  }
 </script>
 
 <main class="flow">
   <p class="kicker">Me</p>
   <h1>Your keys</h1>
+
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <button
+      class="btn ghost"
+      style={!wallet.isAgent ? "border-color:var(--buyer);color:var(--buyer)" : ""}
+      onclick={() => { if (wallet.isAgent) toggleMode(); }}
+    >
+      Personal
+    </button>
+    <button
+      class="btn ghost"
+      style={wallet.isAgent ? "border-color:var(--seller);color:var(--seller)" : ""}
+      onclick={() => { if (!wallet.isAgent) toggleMode(); }}
+    >
+      Agent
+    </button>
+  </div>
+
   <label>
     Name
     <input bind:value={name} placeholder="Your display name" />
@@ -33,6 +55,14 @@
   <button class="btn" type="button" onclick={save}>Save</button>
   {#if saved}
     <p class="muted">Saved on this device.</p>
+  {/if}
+
+  {#if wallet.isAgent}
+    <p class="kicker" style="margin-top:12px">Agent mode</p>
+    <p class="muted">You are in agent mode. Publish offers from the Desk tab. Incoming swap proposals appear on the home screen.</p>
+  {:else}
+    <p class="kicker" style="margin-top:12px">Personal mode</p>
+    <p class="muted">You are in personal mode. Discover agent offers and swap bitcoin for local currency.</p>
   {/if}
   <Nav />
 </main>

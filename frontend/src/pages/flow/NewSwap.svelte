@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { sha256 } from "@noble/hashes/sha2.js";
   import * as api from "../../lib/api";
   import type { OfferSummary } from "../../lib/api";
@@ -17,6 +18,10 @@
   let loading = $state(true);
 
   async function loadOffers() {
+    if (!wallet.pubkey) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (!wallet.pubkey) return;
+    }
     loading = true;
     try {
       offers = await api.listOffers(wallet.pubkey);
@@ -29,6 +34,12 @@
   }
 
   $effect(() => {
+    if (wallet.pubkey) {
+      void loadOffers();
+    }
+  });
+
+  onMount(() => {
     if (wallet.pubkey) {
       void loadOffers();
     }
@@ -72,8 +83,14 @@
 </script>
 
 <main class="flow">
-  <p class="kicker">New swap</p>
-  <h1>Find an agent</h1>
+  {#if wallet.isAgent}
+    <p class="kicker">Agent</p>
+    <h1>Not available</h1>
+    <p class="muted">Agents publish offers, not create swaps. Go to the Desk tab to publish an offer.</p>
+    <a class="btn ghost" href="#/desk">Go to Desk</a>
+  {:else}
+    <p class="kicker">New swap</p>
+    <h1>Find an agent</h1>
 
   {#if loading}
     <p class="muted">Loading offers…</p>
@@ -118,5 +135,6 @@
   <button class="btn" type="button" disabled={busy || !address.includes("@")} onclick={create}>
     {busy ? "Creating…" : "Create swap proposal"}
   </button>
+  {/if}
   <Nav />
 </main>

@@ -602,7 +602,7 @@ async fn list_escrows<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
 ) -> Result<Json<Vec<EscrowRecord>>, (StatusCode, String)> {
     let owner = owner_from_headers(&headers)?;
-    let records = state.store.lock().expect("escrow store mutex poisoned").list(&owner);
+    let records = state.store.lock().expect("escrow store mutex poisoned").list_visible(&owner);
     Ok(Json(records))
 }
 

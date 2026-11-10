@@ -119,6 +119,20 @@ impl EscrowStore {
         self.state.escrows.iter().filter(|record| record.owner == owner).cloned().collect()
     }
 
+    pub fn list_visible(&self, owner: &str) -> Vec<EscrowRecord> {
+        self.state
+            .escrows
+            .iter()
+            .filter(|record| {
+                record.owner == owner
+                    || record.seller_owner == owner
+                    || record.protocol_status == "proposed"
+                    || record.protocol_status == "secured"
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<EscrowRecord> {
         self.state.escrows.iter().find(|record| record.id == id).cloned()
     }

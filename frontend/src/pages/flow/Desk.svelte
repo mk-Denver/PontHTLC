@@ -6,7 +6,6 @@
   import Nav from "./Nav.svelte";
 
   let status = $state<ChannelStatus | null>(null);
-  let height = $state<number | null>(null);
   let offers = $state<OfferSummary[]>([]);
   let error = $state("");
   let busy = $state(false);
@@ -20,13 +19,11 @@
 
   async function refresh() {
     try {
-      const [channels, info, listed] = await Promise.all([
+      const [channelStatus, listed] = await Promise.all([
         api.channelStatus(wallet.pubkey),
-        api.nodeInfo(wallet.pubkey),
         api.listOffers(wallet.pubkey),
       ]);
-      status = channels;
-      height = info.block_height;
+      status = channelStatus;
       offers = listed;
       error = "";
     } catch (err) {
@@ -74,11 +71,14 @@
 </script>
 
 <main class="flow">
-  <p class="kicker">Desk</p>
-  <h1>Agent</h1>
-  <p class="muted">Block {height ?? "—"} · peers {status?.peers_connected ? "connected" : "quiet"}</p>
+  <p class="kicker">Agent desk</p>
+  <h1>Publish offer</h1>
 
-  <p class="kicker" style="margin-top:10px">Channels</p>
+  {#if !wallet.isAgent}
+    <p class="warn">Switch to Agent mode in the Me tab to publish offers.</p>
+  {/if}
+
+  <p class="kicker" style="margin-top:10px">Channel</p>
   <ul class="swap-list">
     {#each status?.channels ?? [] as channel}
       <li>
@@ -95,7 +95,7 @@
     {busy ? "Opening…" : "Open channel"}
   </button>
 
-  <p class="kicker" style="margin-top:10px">Publish offer</p>
+  <p class="kicker" style="margin-top:12px">New offer</p>
   <label>
     Currency
     <input bind:value={currency} placeholder="KES" />
@@ -103,8 +103,8 @@
   <label>
     Direction
     <select bind:value={direction}>
-      <option value="fiat_to_btc">Sell BTC (fiat to BTC)</option>
-      <option value="btc_to_fiat">Buy BTC (BTC to fiat)</option>
+      <option value="fiat_to_btc">Sell BTC (receive fiat)</option>
+      <option value="btc_to_fiat">Buy BTC (send fiat)</option>
     </select>
   </label>
   <label>
@@ -123,12 +123,12 @@
     Payment channels (comma-separated)
     <input bind:value={channels} placeholder="mpesa_phone_ke_kes@2" />
   </label>
-  <button class="btn" type="button" disabled={busy} onclick={publishOffer}>
+  <button class="btn" type="button" disabled={busy || !wallet.isAgent} onclick={publishOffer}>
     {busy ? "Publishing…" : "Publish offer"}
   </button>
 
   {#if offers.length > 0}
-    <p class="kicker" style="margin-top:10px">Your offers ({offers.length})</p>
+    <p class="kicker" style="margin-top:12px">Active offers ({offers.length})</p>
     <ul class="swap-list">
       {#each offers as offer}
         <li>
