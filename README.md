@@ -2,7 +2,7 @@
 
 > Built for [Dakar Bitcoin Hack 2026](https://dakar-bitcoin-hack-2026.devpost.com/)
 
-Non-custodial HTLC-based Bitcoin/Lightning escrow for P2P disputed trades,
+HTLC hold-invoice Bitcoin/Lightning escrow for P2P disputed trades,
 designed for the African context where 10,000-sat trades must be economical.
 
 Built on the [Pontmore protocol](https://github.com/pontmore/protocol)
@@ -12,8 +12,10 @@ extension and Nostr (`NIP-59`) as the transport layer.
 
 **Hosted node architecture**: users don't run their own LDK node — a
 service provider runs `ponthtlc` and users interact via browser + Nostr.
-Non-custodiality is preserved because the preimage is reconstructed
-client-side. See [docs/infrastructure.md](docs/infrastructure.md).
+The host never needs `P` to operate the channel, but the seller who
+sampled `P` can still withhold it. The GF(2^8) split is a private
+payload, not a resolver-enforceable escrow. See
+[docs/infrastructure.md](docs/infrastructure.md).
 
 ## Why this matters for Africa
 
@@ -24,13 +26,16 @@ in-person cash trades), but existing tools are either:
 - **Manual** (no escrow — counterparty risk on every trade)
 - **Expensive** (requiring each trader to run their own Lightning node)
 
-PontHTLC solves this with a **non-custodial escrow** that works for
+PontHTLC solves this with a **hosted hold-invoice escrow** that works for
 small trades:
 
 - **No node to run**: a hosted LDK node handles channels; users use a browser
-- **No trust required**: the preimage is split 2-of-3 Shamir; no single party
-  (including the host) can reconstruct it alone
-- **Dispute resolution**: an arbitrator (Nostr-only) holds the tiebreaker share
+- **Host does not hold P**: the seller samples the preimage and splits it
+  2-of-3 Shamir as a private payload. The host starts with zero shares, but
+  the seller already knows `P` and can withhold it after fiat is paid
+- **Dispute share**: an arbitrator may hold s3. That share is not
+  cut-and-choose verified; a bad s3 is only discovered when reconstruction
+  fails. Resolver-recoverable preimages (RRP) are post-MVP
 - **Low cost**: $0 for users; the operator's VPS serves hundreds of traders
 
 ## Workspace
