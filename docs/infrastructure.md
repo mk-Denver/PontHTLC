@@ -9,35 +9,39 @@ is uneconomical — the infrastructure cost exceeds the trade value.
 
 ## Solution: Hosted Node Service
 
-A **service provider** runs the LDK node(s). and bitcoind. Users
-interact via a lightweight web client (browser) + Nostr. Non-custodiality
-is preserved because the hosted node never knows the preimage `P`.
+A **service provider** runs the LDK node(s) and bitcoind. Users
+interact via a lightweight web client (browser) + Nostr. The host does
+not sample the preimage `P`, but the seller who does can withhold it.
+The GF(2^8) 2-of-3 split is a **private payload**, not a
+resolver-enforceable escrow (that would need RRP, which is post-MVP).
 
-### How non-custodiality survives without running your own node
+### What the host and the seller can and cannot do
 
 | Concern | Resolution |
 |---|---|
-| Host sees preimage P? | No. P is reconstructed **client-side** in the browser from Shamir shares (s1+s2). The browser POSTs P to the API; the hosted node passes P through to `claim_funds(P)` without storing it. P exists in transit only. |
-| Host can steal HTLC funds? | No. Settling the HTLC requires P. P is split 2-of-3. The host has 0 shares. The host cannot reconstruct P. |
-| Host can claim/fail without user? | No. API calls require the user's Nostr-key-signed authorization. The host's LDK node only executes what the user's API request instructs. |
-| Host can log P and replay later? | They could log P in transit (same trust as any payment processor seeing a card number). But a logged P is useless post-claim — the HTLC is already settled. P cannot authorize a new transfer. |
-| User loses funds if host rugs? | The user risks **channel capacity** (locked in the channel the host manages). The **in-flight HTLC** is safe — it fails back to the seller on rug. For 10k sats this risk is acceptable. same as any custodial Lightning wallet. but with the HTLC layer being non-custodial. |
+| Host sees preimage P at setup? | No. The seller samples P and keeps it. Shares move as private payloads. On claim, the browser POSTs P; the hosted node passes it through to `claim_funds(P)`. |
+| Seller can withhold P? | **Yes.** The seller already knows P. After fiat is paid, withholding P until the hold expires refunds the seller and leaves the buyer without sats. The Shamir split does not stop that. |
+| Host can reconstruct P from shares alone? | No. The host starts with zero shares. Settling still requires someone to present P (or a verified recoverable construction such as RRP, not implemented here). |
+| Buyer can verify s3 before paying fiat? | **No (MVP).** There is no cut-and-choose, signed commitment, or DLEQ. A bad arbitrator share is only discovered when reconstruction fails. |
+| Host can log P in transit? | Yes, same as any payment processor seeing a secret in flight. After a successful claim that P cannot authorize a new transfer. |
+| User loses funds if host rugs? | The user risks **channel capacity** (locked in the channel the host manages). An in-flight HTLC that nobody claims fails back to the seller when the lock expires. |
 
 ### Roles
 
 | Role | Who | Runs what | Cost |
 |---|---|---|---|
 | **Node operator** | Service provider (1 per region) | `ponthtlc` daemon + bitcoind + Nostr relay | ~$20-50/mo VPS |
-| **Buyer** | User (browser) | Nostr keypair, receives s1, reconstructs P, calls claim/fail via API | $0 |
-| **Seller** | User (browser) | Nostr keypair, holds s2, funds invoice via hosted node | $0 |
-| **Arbitrator** | Nostr-only process | Holds s3, resolves disputes | $0 |
+| **Buyer** | User (browser) | Nostr keypair, receives s1, reconstructs P when a second share is released, calls claim/fail via API | $0 |
+| **Seller** | User (browser) | Nostr keypair, samples P, holds all shares at split time, funds invoice via hosted node | $0 |
+| **Arbitrator** | Nostr-only process | May hold s3. Cannot force settlement without a recoverable-preimage design | $0 |
 
 ### Trust model
 
 The node operator is trusted for **availability** (uptime, channel
-management, block sync) but NOT for **custody** (they cannot
-reconstruct P, cannot claim/fail without the user's signed API call,
-cannot steal in-flight HTLC funds).
+management, block sync). The host does not start with P, but the
+**seller** does: after fiat moves, withholding P is a real failure mode
+until RRP or another resolver-enforceable lock is adopted. Do not treat
+the GF(2^8) split as "non-custodial by math."
 
 ### Pontmore protocol alignment
 
@@ -69,14 +73,15 @@ different providers can peer via Lightning network.
 ### Preimage flow
 
 ```
-1. Seller originates P, splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
+1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
 2. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
 3. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
 4. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
-5. Seller delivers s1 to buyer via Nostr NIP-59 (encrypted, host sees ciphertext only)
-6. Buyer browser reconstructs P = combine(s1, s2)  [client-side, s2 obtained via Nostr or direct]
+5. Seller delivers s1 (and may send s3) as a private payload; seller still holds P and s2
+6. After fiat, seller releases s2 (or arb sends s3). Buyer reconstructs P client-side.
+   If the seller withholds every path to P, the lock expires and sats return to the seller.
 7. Buyer browser → POST /api/escrow/:id/claim { preimage: P }
-8. Hosted node → claim_funds(P) → pass-through, P not stored
+8. Hosted node → claim_funds(P) → pass-through, P not stored by design
 9. Seller's hosted node → PaymentSent (preimage auto-recovered)
 ```
 
