@@ -426,20 +426,20 @@ export class Session {
     }
   }
 
-  async dispute(id: string, resolver: string) {
+  async dispute(id: string, options?: { resolver?: string; class?: string }) {
     this.busy = "disputing";
     try {
-      const result = await api.disputeEscrow(this.pubkey, id, resolver);
+      const result = await api.disputeEscrow(this.pubkey, id, options);
       this.giftWraps = result.gift_wraps;
       const record = this.escrows.find((item) => item.id === id);
       if (record) {
-        this.patchTrade(record.payment_hash, { outcome: "disputed", arb: resolver });
+        this.patchTrade(record.payment_hash, { outcome: "disputed", arb: result.resolver });
         this.#bus?.send({
           type: "dispute",
           paymentHash: record.payment_hash,
           escrowId: id,
           from: this.pubkey,
-          resolver,
+          resolver: result.resolver,
         });
       }
       this.notice = "Dispute opened. The arbitrator can now send s3.";
