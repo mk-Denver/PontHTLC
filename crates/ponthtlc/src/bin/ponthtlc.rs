@@ -57,7 +57,13 @@ async fn main() {
     };
     let nostr_secret = load_or_create_nostr_secret(&data_dir);
     let relay_url = cfg.relay_url.clone();
-    let state = Arc::new(AppState { node, store: Mutex::new(store), nostr_secret, relay_url: Some(relay_url) });
+    let state = Arc::new(AppState {
+        node,
+        store: Mutex::new(store),
+        nostr_secret,
+        relay_url: Some(relay_url),
+        require_auth: cfg.require_auth,
+    });
     ponthtlc::http::spawn_auto_payout(Arc::clone(&state));
     let app = router(state);
     let addr = SocketAddr::from((cfg.bind, cfg.port));
@@ -86,6 +92,7 @@ struct DaemonConfig {
     rpc_user: String,
     rpc_pass: String,
     relay_url: String,
+    require_auth: bool,
 }
 
 fn parse_config() -> DaemonConfig {
@@ -136,6 +143,10 @@ fn parse_config() -> DaemonConfig {
             .get("relay-url")
             .cloned()
             .unwrap_or_else(|| "ws://127.0.0.1:7777".to_string()),
+        require_auth: matches!(
+            args.get("require-auth").map(|value| value.as_str()),
+            Some("true") | Some("1") | Some("yes")
+        ),
     }
 }
 

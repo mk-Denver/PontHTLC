@@ -123,11 +123,7 @@ impl EscrowStore {
         self.state
             .escrows
             .iter()
-            .filter(|record| {
-                record.owner == owner
-                    || record.seller_owner == owner
-                    || !record.protocol_status.is_empty()
-            })
+            .filter(|record| record.owner == owner || record.seller_owner == owner)
             .cloned()
             .collect()
     }
@@ -520,7 +516,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("escrows.json");
-        let mut store = EscrowStore::open(&path).unwrap();
+        let mut store = EscrowStore::open(path.clone()).unwrap();
         store
             .insert(EscrowRecord {
                 id: "escrow-a".to_string(),
@@ -537,7 +533,7 @@ mod tests {
         assert!(!store.credit_payout("escrow-a", "seller").unwrap());
         assert_eq!(store.balance_of("seller"), 50_000);
         drop(store);
-        let mut store = EscrowStore::open(&path).unwrap();
+        let mut store = EscrowStore::open(path).unwrap();
         assert_eq!(store.balance_of("seller"), 50_000);
         assert_eq!(store.owed().len(), 1);
         store.settle_payout("escrow-a").unwrap();

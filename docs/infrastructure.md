@@ -35,6 +35,24 @@ resolver-enforceable escrow (that would need RRP, which is post-MVP).
 | **Seller** | User (browser) | Nostr keypair, samples P, holds all shares at split time, funds invoice via hosted node | $0 |
 | **Arbitrator** | Nostr-only process | May hold s3. Cannot force settlement without a recoverable-preimage design | $0 |
 
+### API identity and authentication
+
+Every API call carries `X-Nostr-Pubkey` (or the same value on the
+WebSocket query string). That header identifies the caller; it is **not
+a signature**. With default settings, anyone who knows a party's pubkey
+can act as that party on the hosted node. This is a deliberate MVP
+shortcut — the host is the trust root for availability anyway — but it
+must be understood before pointing the daemon at real sats.
+
+The daemon accepts an optional NIP-98-style proof: a signed kind-27235
+event in `X-Nostr-Auth` whose `u`/`method` tags match the request and
+whose event id equals its own SHA-256. Start with `--require-auth true`
+to make the proof mandatory; otherwise the header is verified when
+present and ignored when absent. Signed authorization for
+`swap/fiat_sent`, `core/secure`, and dispute resolution remains a
+separate Nostr-protocol concern: those actions live on the 7300 chain,
+not in HTTP headers.
+
 ### Trust model
 
 The node operator is trusted for **availability** (uptime, channel

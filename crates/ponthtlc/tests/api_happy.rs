@@ -85,6 +85,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         store: Mutex::new(EscrowStore::open(root.join("escrows.json")).unwrap()),
         nostr_secret: [1u8; 32],
         relay_url: None,
+        require_auth: false,
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -185,8 +186,65 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         )
         .await
         .expect("second PaymentClaimable");
-    let (status, failed) = curl_json("POST", &format!("{url}/api/escrow/{fail_id}/fail"), &buyer_owner, "");
+    let (status, failed) = curl_json(
+        "POST",
+        &format!("{url}/api/escrow/{fail_id}/dispute"),
+        &buyer_owner,
+        "",
+    );
     assert_eq!(status, 200, "{failed}");
+    let resolver = failed["resolver"].as_str().unwrap().to_string();
+    assert_eq!(failed["class"].as_str().unwrap(), "timeout");
+
+    let (status, disputed_record) = curl_json(
+        "GET",
+        &format!("{url}/api/escrow/{fail_id}"),
+        &buyer_owner,
+        "",
+    );
+    assert_eq!(status, 200, "{disputed_record}");
+    let tip = disputed_record["tip_id"].as_str().unwrap().to_string();
+    let root_id = disputed_record["root_id"].as_str().unwrap().to_string();
+
+    let resolver_secret = {
+        let mut secret = [1u8; 32];
+        secret[0] ^= 0x03;
+        secret
+    };
+    let resolver_event = ponthtlc_protocol::events::action_template(
+        &resolver,
+        &root_id,
+        &tip,
+        "core/resolve_dispute",
+        Some(serde_json::json!({
+            "policy": ponthtlc_protocol::constants::RESOLUTION_POLICY,
+            "effect": "authorize_refund",
+        })),
+        vec![],
+    );
+    let signed_resolver = ponthtlc_protocol::events::sign_event(resolver_event, &resolver_secret)
+        .expect("sign resolution");
+    let (status, resolved) = curl_json(
+        "POST",
+        &format!("{url}/api/escrow/{fail_id}/resolve"),
+        &buyer_owner,
+        &serde_json::to_string(&serde_json::json!({
+            "event": signed_resolver,
+            "effect": "authorize_refund",
+        }))
+        .unwrap(),
+    );
+    assert_eq!(status, 200, "{resolved}");
+    assert_eq!(resolved["protocol_status"].as_str().unwrap(), "refunded");
+
+    let (status, refetched) = curl_json(
+        "GET",
+        &format!("{url}/api/escrow/{fail_id}"),
+        &buyer_owner,
+        "",
+    );
+    assert_eq!(status, 200, "{refetched}");
+    assert_eq!(refetched["protocol_status"].as_str().unwrap(), "refunded");
     pair.seller
         .wait_for_event(|event| matches!(event, Event::PaymentFailed { .. }), 30)
         .await

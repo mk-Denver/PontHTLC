@@ -8,7 +8,7 @@ use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder};
 
 pub fn build_hold_invoice(
     keys_manager: &KeysManager, payment_hash: [u8; 32], payment_secret: PaymentSecret,
-    amount_msat: u64, currency: Currency,
+    amount_msat: u64, currency: Currency, expiry: Duration,
 ) -> Result<Bolt11Invoice, String> {
     let secp_ctx = Secp256k1::signing_only();
     let node_secret_key = keys_manager.get_node_secret_key();
@@ -20,7 +20,7 @@ pub fn build_hold_invoice(
         .payment_secret(payment_secret)
         .current_timestamp()
         .min_final_cltv_expiry_delta(40)
-        .expiry_time(Duration::from_secs(3600))
+        .expiry_time(expiry)
         .build_signed(|message| secp_ctx.sign_ecdsa_recoverable(message, &node_secret_key))
         .map_err(|err| format!("invoice build_signed failed: {:?}", err))
 }
@@ -48,6 +48,7 @@ mod tests {
             PaymentSecret([9u8; 32]),
             50_000_000,
             Currency::Regtest,
+            Duration::from_secs(10800),
         )
         .unwrap();
         let text = invoice.to_string();
@@ -55,5 +56,6 @@ mod tests {
         let parsed = parse_bolt11(&text).unwrap();
         assert_eq!(payment_hash_bytes(&parsed), payment_hash);
         assert_eq!(parsed.description().to_string(), "PontHTLC hold invoice");
+        assert_eq!(parsed.expiry_time(), Duration::from_secs(10800));
     }
 }

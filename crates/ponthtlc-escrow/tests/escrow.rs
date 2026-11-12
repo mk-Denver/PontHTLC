@@ -105,6 +105,7 @@ impl EscrowNode for MockEscrowNode {
         &self,
         payment_hash: PaymentHash,
         _amount_msat: u64,
+        _invoice_expiry_delta_secs: u32,
     ) -> Result<PaymentSecret, String> {
         self.registered.lock().unwrap().push(payment_hash);
         Ok(PaymentSecret([0u8; 32]))
@@ -126,7 +127,7 @@ fn bridge_secure_returns_payment_secret() {
     let node = MockEscrowNode::new();
     let bridge = LdkBridge::new(node);
     let hash = PaymentHash([1u8; 32]);
-    let secret = bridge.secure(&hash, 50_000_000).unwrap();
+    let secret = bridge.secure(&hash, 50_000_000, 3600).unwrap();
     assert_eq!(secret.0, [0u8; 32]);
 }
 

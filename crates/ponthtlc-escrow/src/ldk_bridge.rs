@@ -8,6 +8,7 @@ pub trait EscrowNode: Send + Sync {
         &self,
         payment_hash: PaymentHash,
         amount_msat: u64,
+        invoice_expiry_delta_secs: u32,
     ) -> Result<PaymentSecret, String>;
     fn claim(&self, preimage: PaymentPreimage) -> Result<(), String>;
     fn fail_htlc(&self, payment_hash: PaymentHash) -> Result<(), String>;
@@ -26,8 +27,10 @@ impl<N: EscrowNode> LdkBridge<N> {
         &self,
         payment_hash: &PaymentHash,
         amount_msat: u64,
+        invoice_expiry_delta_secs: u32,
     ) -> Result<PaymentSecret, String> {
-        self.node.register_hold(*payment_hash, amount_msat)
+        self.node
+            .register_hold(*payment_hash, amount_msat, invoice_expiry_delta_secs)
     }
 
     pub fn settle(
@@ -52,11 +55,12 @@ impl<N: EscrowNode> LdkBridge<N> {
         next: &SwapStatus,
         payment_hash: &PaymentHash,
         amount_msat: u64,
+        invoice_expiry_delta_secs: u32,
         preimage: Option<&PaymentPreimage>,
     ) -> Result<(), String> {
         match (prev, next) {
             (SwapStatus::Accepted, SwapStatus::Secured) => {
-                self.secure(payment_hash, amount_msat)?;
+                self.secure(payment_hash, amount_msat, invoice_expiry_delta_secs)?;
                 Ok(())
             }
             (SwapStatus::SettlementAuthorized, SwapStatus::Settled) => {

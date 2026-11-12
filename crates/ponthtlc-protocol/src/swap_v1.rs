@@ -104,6 +104,23 @@ impl SwapStatus {
             Self::Settled | Self::Refunded | Self::Declined | Self::Cancelled | Self::Expired
         )
     }
+
+    pub fn as_status_str(&self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Accepted => "accepted",
+            Self::Secured => "secured",
+            Self::FiatSent => "fiat_sent",
+            Self::FiatConfirmed => "fiat_confirmed",
+            Self::SettlementAuthorized => "settlement_authorized",
+            Self::RefundAuthorized => "refund_authorized",
+            Self::Settled => "settled",
+            Self::Refunded => "refunded",
+            Self::Declined => "declined",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        }
+    }
 }
 
 const SECURED_OR_LATER: &[SwapStatus] = &[
@@ -876,6 +893,47 @@ fn step(state: &SwapState, a: &ParsedAction) -> StepResult {
                 StepResult::Reject("action not defined by pontmore/swap@1".to_string())
             }
         }
+    }
+}
+
+pub fn apply_action(
+    state: &SwapState,
+    event: &NostrEvent,
+    verify: bool,
+) -> Result<SwapState, ProtocolError> {
+    match parse_action(event, &state.root.id, verify) {
+        ParseActionResult::Ok(parsed) => {
+            if parsed.prev != state.tip {
+                return Err(ProtocolError::new(
+                    "step_rejected",
+                    "action prev does not match the current tip",
+                ));
+            }
+            match step(state, &parsed) {
+                StepResult::Ok(next) => Ok(SwapState {
+                    tip: event.id.clone(),
+                    chain: {
+                        let mut chain = state.chain.clone();
+                        chain.push(AppliedAction {
+                            id: event.id.clone(),
+                            action: parsed.action.clone(),
+                            signer: event.pubkey.clone(),
+                            created_at: event.created_at,
+                            data: parsed.data.clone(),
+                        });
+                        chain
+                    },
+                    rejected: state.rejected.clone(),
+                    ..next
+                }),
+                StepResult::Reject(reason) => Err(ProtocolError::new("step_rejected", reason)),
+            }
+        },
+        ParseActionResult::Skip => Err(ProtocolError::new(
+            "step_rejected",
+            "action is not bound to this root",
+        )),
+        ParseActionResult::Reject(reason) => Err(ProtocolError::new("step_rejected", reason)),
     }
 }
 

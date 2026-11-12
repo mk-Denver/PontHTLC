@@ -8,3 +8,5 @@ test-data/
 Thumbs.db
 frontend/node_modules/
 frontend/dist/
+
+docs/development-journey.md
