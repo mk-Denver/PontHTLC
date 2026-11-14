@@ -263,7 +263,9 @@ export function openEventStream(
   onEvent: (event: WireEvent) => void,
 ): () => void {
   const base = apiBase() || window.location.origin;
-  const url = new URL("/api/ws", new URL(base, window.location.origin));
+  const baseUrl = new URL(base, window.location.origin);
+  const wsPath = baseUrl.pathname.replace(/\/$/, "") + "/api/ws";
+  const url = new URL(wsPath, baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("pubkey", pubkey);
   const socket = new WebSocket(url);

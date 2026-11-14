@@ -75,6 +75,7 @@ export function openRelay(
         Array.isArray(parsed)
         && parsed.length >= 3
         && parsed[0] === "EVENT"
+        && parsed[2] !== null
         && typeof parsed[2] === "object"
       ) {
         onWrap(parsed[2] as NostrEvent);
