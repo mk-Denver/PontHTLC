@@ -39,6 +39,9 @@ Track via [GitHub issues](https://github.com/mk-Denver/PontHTLC/issues).
 - `make test-all` passes (happy/fail/hold via browser-driven integration tests)
 - Restart restores channel state
 - Preimage P never stored on the hosted node (pass-through only)
+- Daemon reconciles event chains from the relay on startup
+- `POST /api/escrow/:id/action` accepts client-signed kind 7301 events
+- Relay publish failures retry (3 attempts with backoff)
 
 ## Phase 3: Post-MVP
 
