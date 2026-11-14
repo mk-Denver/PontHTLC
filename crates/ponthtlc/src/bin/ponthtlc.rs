@@ -66,6 +66,7 @@ async fn main() {
         escrow_locks: Mutex::new(HashMap::new()),
     });
     ponthtlc::http::spawn_auto_payout(Arc::clone(&state));
+    ponthtlc::http::reconcile_all_from_relay(Arc::clone(&state)).await;
     let app = router(state);
     let addr = SocketAddr::from((cfg.bind, cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
