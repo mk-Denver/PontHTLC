@@ -6,7 +6,7 @@ use bitcoin::hashes::Hash;
 use lightning::events::{Event, PaymentPurpose};
 use ponthtlc::bitcoind::BitcoindFacade;
 use ponthtlc::dual::DualNode;
-use ponthtlc::http::{router, AppState};
+use ponthtlc::http::{router, spawn_auto_payout, AppState};
 use ponthtlc::tenancy::EscrowStore;
 
 fn curl_json(method: &str, url: &str, owner: &str, body: &str) -> (u16, serde_json::Value) {
@@ -80,14 +80,16 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     let channel_id = pair.existing_channel_id().expect("real channel id after ChannelReady");
     assert!(pair.has_usable_route(), "internal channel is not usable");
 
-    let app = router(Arc::new(AppState {
+    let state = Arc::new(AppState {
         node: pair.clone(),
         store: Mutex::new(EscrowStore::open(root.join("escrows.json")).unwrap()),
         nostr_secret: [1u8; 32],
         relay_url: None,
         require_auth: false,
         escrow_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
-    }));
+    });
+    spawn_auto_payout(Arc::clone(&state));
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -150,6 +152,7 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         .wait_for_event(|event| matches!(event, Event::PaymentSent { .. }), 30)
         .await
         .expect("seller never saw PaymentSent");
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (status, settled) = curl_json("GET", &format!("{url}/api/escrow/{id}"), &buyer_owner, "");
     assert_eq!(status, 200, "{settled}");
@@ -236,7 +239,13 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
         .unwrap(),
     );
     assert_eq!(status, 200, "{resolved}");
-    assert_eq!(resolved["protocol_status"].as_str().unwrap(), "refunded");
+    assert_eq!(resolved["protocol_status"].as_str().unwrap(), "fail_pending");
+
+    pair.seller
+        .wait_for_event(|event| matches!(event, Event::PaymentFailed { .. }), 30)
+        .await
+        .expect("seller never saw PaymentFailed");
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (status, refetched) = curl_json(
         "GET",
@@ -246,10 +255,6 @@ async fn http_happy_path_pays_and_claims_without_storing_the_preimage() {
     );
     assert_eq!(status, 200, "{refetched}");
     assert_eq!(refetched["protocol_status"].as_str().unwrap(), "refunded");
-    pair.seller
-        .wait_for_event(|event| matches!(event, Event::PaymentFailed { .. }), 30)
-        .await
-        .expect("seller never saw PaymentFailed");
 
     assert_daemon_files_omit_preimage(&root, &preimage);
 

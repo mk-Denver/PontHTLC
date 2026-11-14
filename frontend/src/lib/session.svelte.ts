@@ -44,13 +44,11 @@ export type Peer = {
 type Persisted = {
   role: Role;
   name: string;
-  secret: string;
   pubkey: string;
   peer: string;
   arb: string;
   relay: string;
   trades: Trade[];
-  shares: Record<string, ShareMap>;
   peers: Peer[];
 };
 
@@ -274,12 +272,14 @@ export class Session {
       if (isHex64(arb)) {
         this.arb = arb;
       }
-      this.#bus?.send({
-        type: "offer",
-        paymentHash,
-        amountMsat,
-        seller: this.pubkey,
-      });
+      if (!this.relayUrl) {
+        this.#bus?.send({
+          type: "offer",
+          paymentHash,
+          amountMsat,
+          seller: this.pubkey,
+        });
+      }
       await this.sendShare(paymentHash, SHARE_X_BUYER, buyer);
       if (isHex64(arb)) {
         await this.sendShare(paymentHash, SHARE_X_ARBITRATOR, arb);
@@ -309,13 +309,15 @@ export class Session {
       });
       this.peer = offer.seller;
       this.selectedId = created.id;
-      this.#bus?.send({
-        type: "invoice",
-        escrowId: created.id,
-        bolt11: created.bolt11_invoice,
-        paymentHash: offer.paymentHash,
-        buyer: this.pubkey,
-      });
+      if (!this.relayUrl) {
+        this.#bus?.send({
+          type: "invoice",
+          escrowId: created.id,
+          bolt11: created.bolt11_invoice,
+          paymentHash: offer.paymentHash,
+          buyer: this.pubkey,
+        });
+      }
       await this.refresh();
       this.notice = "Hold invoice created. Share it with the seller.";
       this.persist();
@@ -337,13 +339,15 @@ export class Session {
       createdAt: Date.now(),
     });
     this.selectedId = created.id;
-    this.#bus?.send({
-      type: "invoice",
-      escrowId: created.id,
-      bolt11: created.bolt11_invoice,
-      paymentHash: created.payment_hash,
-      buyer: this.pubkey,
-    });
+    if (!this.relayUrl) {
+      this.#bus?.send({
+        type: "invoice",
+        escrowId: created.id,
+        bolt11: created.bolt11_invoice,
+        paymentHash: created.payment_hash,
+        buyer: this.pubkey,
+      });
+    }
     await this.refresh();
     this.persist();
     return created;
@@ -618,13 +622,11 @@ export class Session {
       const parsed = JSON.parse(raw) as Persisted;
       this.role = parsed.role;
       this.name = parsed.name ?? defaultName(parsed.role);
-      this.secret = parsed.secret;
-      this.pubkey = parsed.pubkey || pubkeyFromSecret(hexToBytes(parsed.secret));
+      this.pubkey = parsed.pubkey ?? "";
       this.peer = parsed.peer ?? "";
       this.arb = parsed.arb ?? "";
       this.relayUrl = parsed.relay ?? "";
       this.trades = parsed.trades ?? [];
-      this.shares = parsed.shares ?? {};
       this.peers = parsed.peers ?? [];
     } catch {
       sessionStorage.removeItem(SESSION_KEY);
@@ -638,13 +640,11 @@ export class Session {
     const payload: Persisted = {
       role: this.role,
       name: this.name,
-      secret: this.secret,
       pubkey: this.pubkey,
       peer: this.peer,
       arb: this.arb,
       relay: this.relayUrl,
       trades: this.trades,
-      shares: this.shares,
       peers: this.peers,
     };
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));

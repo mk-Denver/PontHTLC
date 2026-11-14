@@ -61,6 +61,14 @@ management, block sync). The host does not start with P, but the
 until RRP or another resolver-enforceable lock is adopted. Do not treat
 the GF(2^8) split as "non-custodial by math."
 
+The browser tab stores Shamir shares and the Nostr secret in memory
+only; they are not written to `sessionStorage`. When a relay URL is
+configured, offers and BOLT11 invoices travel via NIP-59 gift wraps, not
+the cleartext `BroadcastChannel` (which is a same-origin demo bus for
+local development). A page script on the hosted origin can still read
+in-memory state while the tab is open — the hosted page is inside the
+trust boundary.
+
 ### Pontmore protocol alignment
 
 In `pontmore/swap@1` terms:
@@ -92,10 +100,11 @@ different providers can peer via Lightning network.
 
 ```
 1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
-2. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
-3. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
-4. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
-5. Seller delivers s1 (and may send s3) as a private payload; seller still holds P and s2
+2. Seller delivers s1 to the buyer and s3 to the arbitrator via NIP-59 gift wrap (or BroadcastChannel
+   in local-demo mode) at originate time, before the hold invoice exists
+3. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
+4. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
+5. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
 6. After fiat, seller releases s2 (or arb sends s3). Buyer reconstructs P client-side.
    If the seller withholds every path to P, the lock expires and sats return to the seller.
 7. Buyer browser → POST /api/escrow/:id/claim { preimage: P }
