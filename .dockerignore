@@ -6,3 +6,8 @@ frontend/dist
 spike-data
 test-data
 *.log
+.env
+.env.*
+Dockerfile
+.dockerignore
+docker-compose*.yml

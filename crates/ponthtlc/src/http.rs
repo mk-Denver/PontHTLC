@@ -988,6 +988,8 @@ async fn fund_escrow<N: HoldNode>(
 async fn accept_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let _owner = owner_from_headers(&headers)?;
     {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -1055,6 +1057,8 @@ async fn fiat_sent<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
     Json(body): Json<FiatSentRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let _owner = owner_from_headers(&headers)?;
     {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -1087,6 +1091,8 @@ async fn fiat_sent<N: HoldNode>(
 async fn fiat_confirmed<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let _owner = owner_from_headers(&headers)?;
     {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -1163,6 +1169,8 @@ async fn fail_escrow<N: HoldNode>(
 async fn expire_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let owner = owner_from_headers(&headers)?;
     {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -1209,6 +1217,8 @@ async fn dispute_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
     body: Option<Json<DisputeRequest>>,
 ) -> Result<Json<DisputeResponse>, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let owner = owner_from_headers(&headers)?;
     let body = body.map(|Json(body)| body).unwrap_or(DisputeRequest { resolver: None, class: None });
     let class = match body.class.as_deref() {

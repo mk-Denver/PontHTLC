@@ -1,6 +1,6 @@
 export function hexToBytes(hex: string): Uint8Array {
   const clean = hex.trim().toLowerCase();
-  if (!/^[0-9a-f]*$/.test(clean) || clean.length % 2 !== 0) {
+  if (clean.length === 0 || !/^[0-9a-f]+$/.test(clean) || clean.length % 2 !== 0) {
     throw new Error("invalid hex");
   }
   const out = new Uint8Array(clean.length / 2);
@@ -26,6 +26,9 @@ export function shortHex(value: string, size = 8): string {
 }
 
 export function randomBytes(length: number): Uint8Array {
+  if (typeof crypto === "undefined" || !crypto.getRandomValues) {
+    throw new Error("secure context required for random bytes");
+  }
   const out = new Uint8Array(length);
   crypto.getRandomValues(out);
   return out;

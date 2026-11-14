@@ -19,11 +19,13 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/ponthtlc /usr/local/bin/ponthtlc
+
+RUN groupadd -r app && useradd -r -g app app && mkdir -p /data && chown app:app /data
+USER app
 
 EXPOSE 9800
 VOLUME /data

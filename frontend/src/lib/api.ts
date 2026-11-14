@@ -89,9 +89,13 @@ async function request<T>(
     throw new ApiError(response.status, text || response.statusText);
   }
   if (!text) {
-    return undefined as T;
+    return undefined as unknown as T;
   }
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(response.status, `Invalid JSON response: ${text.slice(0, 200)}`);
+  }
 }
 
 export function health(): Promise<boolean> {
@@ -258,16 +262,19 @@ export function openEventStream(
   pubkey: string,
   onEvent: (event: WireEvent) => void,
 ): () => void {
-  const url = new URL(`${apiBase() || window.location.origin}/api/ws`);
+  const base = apiBase() || window.location.origin;
+  const url = new URL("/api/ws", new URL(base, window.location.origin));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("pubkey", pubkey);
   const socket = new WebSocket(url);
   socket.onmessage = (message) => {
     try {
       onEvent(JSON.parse(String(message.data)) as WireEvent);
-    } catch {
-      return;
+    } catch (err) {
+      console.warn("Failed to parse wire event", err);
     }
   };
+  socket.onerror = () => {};
+  socket.onclose = () => {};
   return () => socket.close();
 }

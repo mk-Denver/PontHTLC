@@ -59,6 +59,12 @@ export function evalPoly(coeffs: [number, number], x: number): number {
 }
 
 export function combineShares(left: Share, right: Share): Uint8Array {
+  if (left.bytes.length !== 32 || right.bytes.length !== 32) {
+    throw new Error("combineShares: each share must be 32 bytes");
+  }
+  if (left.x === right.x) {
+    throw new Error("combineShares: shares must have distinct x values");
+  }
   const denom = (left.x ^ right.x) & 0xff;
   const denomInv = gfInv(denom);
   const secret = new Uint8Array(32);
@@ -100,10 +106,12 @@ export function reconstructAndVerify(
   if (hash.length !== expectedHash.length) {
     return null;
   }
+  let mismatch = 0;
   for (let i = 0; i < hash.length; i++) {
-    if (hash[i] !== expectedHash[i]) {
-      return null;
-    }
+    mismatch |= hash[i] ^ expectedHash[i];
+  }
+  if (mismatch !== 0) {
+    return null;
   }
   return preimage;
 }

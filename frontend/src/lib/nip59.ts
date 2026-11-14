@@ -39,7 +39,6 @@ export type OpenedShare = {
 
 async function buildSeal(
   senderSk: Uint8Array,
-  senderPk: string,
   recipientPk: string,
   rumorJson: string,
 ): Promise<NostrEvent> {
@@ -95,8 +94,8 @@ export async function wrapShare(args: {
     content: JSON.stringify(payload),
   });
   const rumorJson = JSON.stringify(rumor);
-  const sealToRecipient = await buildSeal(args.senderSk, args.senderPk, args.recipientPk, rumorJson);
-  const sealToSender = await buildSeal(args.senderSk, args.senderPk, args.senderPk, rumorJson);
+  const sealToRecipient = await buildSeal(args.senderSk, args.recipientPk, rumorJson);
+  const sealToSender = await buildSeal(args.senderSk, args.senderPk, rumorJson);
   return [
     await wrapSeal(sealToRecipient, args.recipientPk),
     await wrapSeal(sealToSender, args.senderPk),
@@ -134,6 +133,9 @@ export async function openWrap(wrap: NostrEvent, recipientSk: Uint8Array): Promi
     return null;
   }
   if (!verifyEvent(rumor) || rumor.kind !== KIND_SWAP_PAYLOAD) {
+    return null;
+  }
+  if (rumor.pubkey !== seal.pubkey) {
     return null;
   }
   const eTags = rumor.tags.filter((tag) => tag[0] === "e");
