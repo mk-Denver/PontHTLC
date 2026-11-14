@@ -8,6 +8,7 @@ pub struct EscrowMachine<N: crate::ldk_bridge::EscrowNode> {
     root: SwapRoot,
     payment_hash: PaymentHash,
     amount_msat: u64,
+    invoice_expiry_delta_secs: u32,
     bridge: LdkBridge<N>,
     last_status: SwapStatus,
     chain_len: usize,
@@ -18,12 +19,14 @@ impl<N: crate::ldk_bridge::EscrowNode> EscrowMachine<N> {
         root: SwapRoot,
         payment_hash: PaymentHash,
         amount_msat: u64,
+        invoice_expiry_delta_secs: u32,
         bridge: LdkBridge<N>,
     ) -> Self {
         Self {
             root,
             payment_hash,
             amount_msat,
+            invoice_expiry_delta_secs,
             bridge,
             last_status: SwapStatus::Proposed,
             chain_len: 0,
@@ -56,6 +59,7 @@ impl<N: crate::ldk_bridge::EscrowNode> EscrowMachine<N> {
                     &next,
                     &self.payment_hash,
                     self.amount_msat,
+                    self.invoice_expiry_delta_secs,
                     None,
                 )?;
                 self.last_status = next;

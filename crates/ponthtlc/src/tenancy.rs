@@ -123,11 +123,7 @@ impl EscrowStore {
         self.state
             .escrows
             .iter()
-            .filter(|record| {
-                record.owner == owner
-                    || record.seller_owner == owner
-                    || !record.protocol_status.is_empty()
-            })
+            .filter(|record| record.owner == owner || record.seller_owner == owner)
             .cloned()
             .collect()
     }
@@ -349,22 +345,31 @@ impl EscrowStore {
     }
 
     pub fn append_event(&mut self, escrow_id: &str, event: NostrEvent) -> Result<String, String> {
+        self.append_events(escrow_id, &[event])
+    }
+
+    pub fn append_events(&mut self, escrow_id: &str, events: &[NostrEvent]) -> Result<String, String> {
+        if events.is_empty() {
+            return Ok(String::new());
+        }
         let chain = self
             .state
             .event_chains
             .entry(escrow_id.to_string())
             .or_default();
-        chain.push(event.clone());
-        let event_id = event.id.clone();
+        let last_id = events.last().unwrap().id.clone();
+        for event in events {
+            chain.push(event.clone());
+        }
         let record = self
             .state
             .escrows
             .iter_mut()
             .find(|record| record.id == escrow_id)
             .ok_or_else(|| "escrow not found".to_string())?;
-        record.tip_id = Some(event_id.clone());
+        record.tip_id = Some(last_id.clone());
         self.persist()?;
-        Ok(event_id)
+        Ok(last_id)
     }
 
     pub fn get_events(&self, escrow_id: &str) -> Vec<NostrEvent> {
@@ -520,7 +525,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("escrows.json");
-        let mut store = EscrowStore::open(&path).unwrap();
+        let mut store = EscrowStore::open(path.clone()).unwrap();
         store
             .insert(EscrowRecord {
                 id: "escrow-a".to_string(),
@@ -537,7 +542,7 @@ mod tests {
         assert!(!store.credit_payout("escrow-a", "seller").unwrap());
         assert_eq!(store.balance_of("seller"), 50_000);
         drop(store);
-        let mut store = EscrowStore::open(&path).unwrap();
+        let mut store = EscrowStore::open(path).unwrap();
         assert_eq!(store.balance_of("seller"), 50_000);
         assert_eq!(store.owed().len(), 1);
         store.settle_payout("escrow-a").unwrap();

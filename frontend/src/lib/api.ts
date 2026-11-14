@@ -56,6 +56,8 @@ export type NostrEventJson = {
 };
 
 export type DisputeResponse = {
+  resolver: string;
+  class: string;
   gift_wraps: NostrEventJson[];
 };
 
@@ -181,11 +183,14 @@ export function fiatConfirmed(pubkey: string, id: string): Promise<void> {
 export function disputeEscrow(
   pubkey: string,
   id: string,
-  resolver: string,
+  options?: { resolver?: string; class?: string },
 ): Promise<DisputeResponse> {
+  const body: Record<string, string> = {};
+  if (options?.resolver !== undefined) body.resolver = options.resolver;
+  if (options?.class !== undefined) body.class = options.class;
   return request(pubkey, `/api/escrow/${id}/dispute`, {
     method: "POST",
-    body: JSON.stringify({ resolver }),
+    body: JSON.stringify(body),
   });
 }
 
