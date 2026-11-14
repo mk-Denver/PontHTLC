@@ -31,6 +31,17 @@ Track via [GitHub issues](https://github.com/mk-Denver/PontHTLC/issues).
 | #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | merged |
 | #11 | Multi-node daemon (buyer + seller LDK nodes + channel open API) | merged |
 | #5 | Docker Compose (4 services: bitcoind, relay, ponthtlc, frontend) | merged |
+| #23 | Direction-aware signing keys + customer_pubkey binding | merged |
+| #24 | Invoice expiry vs fiat_confirm_by | merged |
+| #25 | Opt-in NIP-98-style HTTP auth | merged |
+| #26 | Reducer-gated money moves (apply_action) | merged |
+| #27 | Dispute class/resolver binding + resolve endpoint | merged |
+| #28 | Publish agent+descriptor to relay, fix compose wiring | merged |
+| #29 | Durable intent before LDK call + event observation | merged |
+| #30 | Stop cleartext BroadcastChannel, fix sessionStorage, docs | merged |
+| #33 | Amount validation + quote commitment | merged |
+| #45 | Event-driven relay model (reconciliation, client-signed actions) | merged |
+| #47 | Daemon holds s3 as resolver (arb-share endpoint) | merged |
 
 ### MVP definition of done
 
@@ -49,6 +60,11 @@ Track via [GitHub issues](https://github.com/mk-Denver/PontHTLC/issues).
   in a [`pontmore/pontmore`](https://github.com/pontmore/pontmore) deployment
   (connector manifest matching `escrow_secure`/`escrow_settle`/`escrow_refund`/
   `resolve_dispute` effect types)
+- Multi-relay support: query more than one relay before the deadline, wait
+  for EOSE, treat no reply as unknown (#45 post-MVP scope)
+- Attestation oracles / per-reference nullifiers / reversal bonds (#31)
+- Full browser-side signing (user signs `swap/fiat_sent` and `core/accept`
+  with their own key, no daemon re-signing)
 - CI/CD pipeline (GitHub Actions)
 - Multi-escrow support (concurrent escrows)
 - Public channel gossip / routing (beyond direct-peer)

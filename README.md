@@ -147,9 +147,9 @@ docker compose up -d                    # start bitcoind regtest + Nostr relay
 
 # unit tests (no infrastructure needed)
 cargo test -p ponthtlc-protocol         # 14 tests: PIP stack, state machine, offers
-cargo test -p ponthtlc-escrow           # 7 tests: Shamir, LDK bridge mock
+cargo test -p ponthtlc-escrow           # 8 tests: Shamir, LDK bridge mock
 cargo test -p ponthtlc-spike            # 15 tests: GF(2^8) Shamir math
-cargo test -p ponthtlc --lib            # HTTP API, escrow store, channel-open route
+cargo test -p ponthtlc --lib            # 24 tests: HTTP API, escrow store, channel-open route, auth, dispute, resolve
 
 # integration tests (require Docker containers)
 cargo run -p ponthtlc-spike -- --scenario happy    # LDK hold-invoice lifecycle
@@ -157,7 +157,7 @@ cargo run -p ponthtlc-spike -- --scenario fail     # fail_htlc_backwards → Pay
 cargo run -p ponthtlc-spike -- --scenario hold     # expiry past claim_deadline
 cargo test -p ponthtlc-nostr --test relay_integration  # NIP-59 round-trip via strfry
 
-# frontend (issue #4 — no daemon required for unit tests)
+# frontend (no daemon required for unit tests)
 cd frontend && npm test && npm run dev
 ```
 
@@ -174,9 +174,11 @@ cd frontend && npm test && npm run dev
 
 ## Status
 
-Issues #1–#5 and #11 are **merged**. The hosted daemon, PIP stack, REST
-API, browser desks, multi-node channel topology, and MVP Docker Compose
-are live. The daemon runs buyer and seller LDK nodes in one process so
-`fund` routes through an internal channel. Security hardening issues
-(#23–#43) are merged. See
-[ROADMAP.md](ROADMAP.md) for the full status table.
+Issues #1–#5, #11, and #23–#47 are **merged**. The hosted daemon,
+PIP stack, REST API, browser desks, multi-node channel topology, MVP
+Docker Compose, event-driven relay model, and security hardening are
+live. The daemon runs buyer and seller LDK nodes in one process,
+holds s3 as the resolver, reconciles event chains from the relay on
+startup, and accepts client-signed kind 7301 events via
+`POST /api/escrow/:id/action`. See [ROADMAP.md](ROADMAP.md) for the
+full status table.

@@ -6,7 +6,7 @@ Validate the core primitive of the PontHTLC architecture before building the Nos
 
 > The buyer's LDK node registers `H = sha256(P)` from an HTLC's DHT preimage that it does NOT know (via `create_inbound_payment_for_hash`), signs a BOLT11 hold invoice with the preimage unknown, and keeps the HTLC in-flight until a manual `claim_funds(...)` / `fail_htlc_backwards(...)` call, or LDK expiry semantics take over past `claim_deadline`.
 
-If this spike passes, the non-custodial HTLC escrow design (PIP-1: 2-of-3 shares of preimage, arb as a Nostr-only participant, seller-funded / buyer-held invoices) may proceed.
+If this spike passes, the non-custodial HTLC escrow design (PIP-1: 2-of-3 shares of preimage, the daemon holds s3 as the resolver, seller-funded / buyer-held invoices) may proceed.
 
 ## How to run
 
@@ -64,7 +64,7 @@ cargo run -p spike -- --scenario hold
 ## Known tradeoffs taken
 
 - `ChainMonitor/ChainManager` fresh-state only (no restore from filesystem) — each run does `remove_dir_all(spike-data)`.
-- No `lightning_background_processsor` — a manual event pump loops `get_and_clear_pending_events` + `chain_monitor.process_pending_events()` every 20 ms.
+- No `lightning_background_processsor` — a manual event pump loops `process_pending_events_async` + `chain_monitor.process_pending_events()` every 20 ms.
 - No gossip: `route_handler`/`onion_message_handler`/`custom_message_handler` are `IgnoringMessageHandler`.
 - Fees are hard-coded constants rather than `estimatesmartfee`.
 

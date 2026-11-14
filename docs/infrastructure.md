@@ -21,7 +21,7 @@ resolver-enforceable escrow (that would need RRP, which is post-MVP).
 |---|---|
 | Host sees preimage P at setup? | No. The seller samples P and keeps it. Shares move as private payloads. On claim, the browser POSTs P; the hosted node passes it through to `claim_funds(P)`. |
 | Seller can withhold P? | **Yes.** The seller already knows P. After fiat is paid, withholding P until the hold expires refunds the seller and leaves the buyer without sats. The Shamir split does not stop that. |
-| Host can reconstruct P from shares alone? | No. The host starts with zero shares. Settling still requires someone to present P (or a verified recoverable construction such as RRP, not implemented here). |
+| Host can reconstruct P from shares alone? | No. The host holds only s3 (submitted by the seller after funding). It needs s1 or s2 to reconstruct P, which are held by the buyer and seller respectively. |
 | Buyer can verify s3 before paying fiat? | **No (MVP).** There is no cut-and-choose, signed commitment, or DLEQ. A bad arbitrator share is only discovered when reconstruction fails. |
 | Host can log P in transit? | Yes, same as any payment processor seeing a secret in flight. After a successful claim that P cannot authorize a new transfer. |
 | User loses funds if host rugs? | The user risks **channel capacity** (locked in the channel the host manages). An in-flight HTLC that nobody claims fails back to the seller when the lock expires. |
@@ -32,7 +32,7 @@ resolver-enforceable escrow (that would need RRP, which is post-MVP).
 |---|---|---|---|
 | **Node operator** | Service provider (1 per region) | `ponthtlc` daemon + bitcoind + Nostr relay | ~$20-50/mo VPS |
 | **Buyer** | User (browser) | Nostr keypair, receives s1, reconstructs P when a second share is released, calls claim/fail via API | $0 |
-| **Seller** | User (browser) | Nostr keypair, samples P, holds all shares at split time, funds invoice via hosted node | $0 |
+| **Seller** | User (browser) | Nostr keypair, samples P, splits 2-of-3 Shamir, holds s2, funds invoice via hosted node, submits s3 to daemon after funding | $0 |
 | **Arbitrator** | Nostr-only process | The daemon (node operator) holds s3 as the resolver. Cannot force settlement without a recoverable-preimage design, but can release s3 during dispute resolution so the buyer can reconstruct P | $0 |
 
 ### API identity and authentication
@@ -66,10 +66,10 @@ the GF(2^8) split as "non-custodial by math."
 
 The browser tab keeps the Nostr secret and received Shamir shares in
 memory; the `Session` persistence layer no longer writes `secret` or
-`shares` to `sessionStorage`. However, the seller handoff page
+`shares` to `sessionStorage`, and `wallet.svelte.ts` no longer persists
+the wallet secret either. However, the seller handoff page
 (`NewSwap.svelte`) writes all three shares to a per-escrow
-`sessionStorage` key for manual copy/paste, and `wallet.svelte.ts`
-persists the wallet secret in `sessionStorage`. A page script on the
+`sessionStorage` key for manual copy/paste. A page script on the
 hosted origin can read these — the hosted page is inside the trust
 boundary. Offers and BOLT11 invoices travel on the same-origin
 `BroadcastChannel` (a demo bus); NIP-59 gift wraps carry share delivery
@@ -110,7 +110,7 @@ In `pontmore/swap@1` terms:
 - `swap/agent` = the hosted node service (provides Lightning infrastructure)
 - `swap/customer` = the user (provides authorization via Nostr key + Shamir shares)
 - `core/escrow` = the LDK channel (managed by the hosted node)
-- `core/resolver` = the arbitrator (Nostr-only)
+- `core/resolver` = the daemon (node operator) holding s3
 
 The [`pontmore/pontmore`](https://github.com/pontmore/pontmore) reference implementation's
 `pontmored` daemon is exactly this pattern: a central service with
