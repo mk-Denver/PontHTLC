@@ -292,6 +292,7 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
         .route("/api/escrow/:id/resolve", post(resolve_escrow::<N>))
         .route("/api/escrow/:id/arb-share", post(submit_arb_share::<N>))
+        .route("/api/escrow/:id/action", post(submit_action::<N>))
         .route("/api/invoice/pay", post(pay_invoice::<N>))
         .route("/api/channel/open", post(open_channel_route::<N>))
         .route("/api/channel/status", get(channel_status::<N>))
@@ -1536,6 +1537,63 @@ async fn submit_arb_share<N: HoldNode>(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionRequest {
+    event: NostrEvent,
+}
+
+#[derive(Serialize)]
+struct ActionResponse {
+    protocol_status: String,
+    tip_id: String,
+}
+
+async fn submit_action<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<ActionRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
+    let owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let record = store
+            .get(&id)
+            .filter(|r| r.owner == owner || r.seller_owner == owner)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+        let _ = record;
+    }
+    let event = body.event;
+    if !event.verify() {
+        return Err((StatusCode::UNAUTHORIZED, "event signature is invalid".to_string()));
+    }
+    if event.kind != ponthtlc_protocol::constants::KIND_ACTION {
+        return Err((StatusCode::BAD_REQUEST, "event must be a kind 7301 action".to_string()));
+    }
+    reconcile_escrow_from_relay(&state, &id).await;
+    let (reduced, next) = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let reduced = reduce_chain(&store, &id).map_err(chain_error)?;
+        let next = apply_action(&reduced, &event, true)
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        (reduced, next)
+    };
+    let event_id = event.id.clone();
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        store
+            .append_events(&id, std::slice::from_ref(&event))
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to append event".to_string()))?;
+    }
+    let relay_url = state.relay_url.clone();
+    publish_events(&relay_url, std::slice::from_ref(&event)).await;
+    Ok(Json(ActionResponse {
+        protocol_status: format!("{:?}", next.status).to_lowercase(),
+        tip_id: event_id,
+    }))
+}
+
 #[derive(Serialize)]
 struct NodeInfo {
     node_pubkey: String,
@@ -1791,13 +1849,22 @@ fn new_id() -> String {
 
 async fn publish_event(relay_url: &Option<String>, event: &NostrEvent) {
     if let Some(url) = relay_url {
-        match Relay::connect(url).await {
-            Ok(relay) => {
-                if let Err(e) = relay.publish(event).await {
-                    eprintln!("[warn] relay publish failed for event {}: {e}", event.id);
+        let mut attempts = 0;
+        while attempts < 3 {
+            match Relay::connect(url).await {
+                Ok(relay) => {
+                    if let Err(e) = relay.publish(event).await {
+                        eprintln!("[warn] relay publish failed for event {}: {e}", event.id);
+                    } else {
+                        return;
+                    }
                 }
+                Err(e) => eprintln!("[warn] relay connect failed for {url}: {e}"),
             }
-            Err(e) => eprintln!("[warn] relay connect failed for {url}: {e}"),
+            attempts += 1;
+            if attempts < 3 {
+                tokio::time::sleep(Duration::from_millis(500 * attempts as u64)).await;
+            }
         }
     }
 }
@@ -1805,6 +1872,84 @@ async fn publish_event(relay_url: &Option<String>, event: &NostrEvent) {
 async fn publish_events(relay_url: &Option<String>, events: &[NostrEvent]) {
     for event in events {
         publish_event(relay_url, event).await;
+    }
+}
+
+async fn fetch_chain_from_relay(
+    relay_url: &Option<String>, root_id: &str,
+) -> Vec<NostrEvent> {
+    let Some(url) = relay_url else {
+        return Vec::new();
+    };
+    let relay = match Relay::connect(url).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[warn] relay connect for reconcile failed: {e}");
+            return Vec::new();
+        }
+    };
+    let sub_id = format!("reconcile-{root_id}");
+    let kinds = [ponthtlc_protocol::constants::KIND_ROOT, ponthtlc_protocol::constants::KIND_ACTION];
+    if let Err(e) = relay.subscribe(&sub_id, &kinds, &[], &[], &[root_id], None, None, None).await {
+        eprintln!("[warn] relay subscribe for reconcile failed: {e}");
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, relay.recv()).await {
+            Ok(Ok(Some((_sub, event)))) => {
+                events.push(event);
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = relay.unsubscribe(&sub_id).await;
+    events
+}
+
+pub async fn reconcile_escrow_from_relay<N: HoldNode>(state: &Arc<AppState<N>>, escrow_id: &str) {
+    let relay_url = state.relay_url.clone();
+    let root_id = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        match store.get_root_id(escrow_id) {
+            Some(id) => id,
+            None => return,
+        }
+    };
+    let relay_events = fetch_chain_from_relay(&relay_url, &root_id).await;
+    if relay_events.is_empty() {
+        return;
+    }
+    let mut store = state.store.lock().expect("escrow store mutex poisoned");
+    let local_ids: std::collections::HashSet<String> = store
+        .get_events(escrow_id)
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
+    let new_events: Vec<NostrEvent> = relay_events
+        .into_iter()
+        .filter(|e| !local_ids.contains(&e.id))
+        .collect();
+    if !new_events.is_empty() {
+        eprintln!("[reconcile] {} new event(s) from relay for escrow {}", new_events.len(), escrow_id);
+        let _ = store.append_events(escrow_id, &new_events);
+    }
+}
+
+pub async fn reconcile_all_from_relay<N: HoldNode>(state: Arc<AppState<N>>) {
+    let escrow_ids: Vec<String> = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        store.all_ids()
+    };
+    for id in &escrow_ids {
+        reconcile_escrow_from_relay(&state, id).await;
     }
 }
 

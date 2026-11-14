@@ -122,6 +122,10 @@ impl EscrowStore {
         self.state.escrows.iter().filter(|record| record.owner == owner).cloned().collect()
     }
 
+    pub fn all_ids(&self) -> Vec<String> {
+        self.state.escrows.iter().map(|record| record.id.clone()).collect()
+    }
+
     pub fn list_visible(&self, owner: &str) -> Vec<EscrowRecord> {
         self.state
             .escrows

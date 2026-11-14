@@ -84,6 +84,14 @@ via NIP-59 gift wrap (kind 1059 → seal kind 13 → signed rumor kind 7310).
 The relay sees only ciphertext. Shares never appear in PIP-02 `terms` or
 action `data` fields.
 
+The relay is the coordination surface: on startup the daemon fetches
+event chains for every known escrow and reconciles local state. HTTP
+endpoints are thin wrappers that sign, persist, and publish events to
+the relay. The `POST /api/escrow/:id/action` endpoint accepts
+client-signed kind 7301 events so a browser holding the user's Nostr
+key can submit actions without the daemon re-signing. Publish failures
+retry (3 attempts with backoff).
+
 ## Setup
 
 ### Prerequisites

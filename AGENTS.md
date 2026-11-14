@@ -65,6 +65,12 @@ new profiles. The 2-of-3 Shamir split is a private-payload extension.
 See [docs/spike-runbook.md](docs/spike-runbook.md) for the LDK-to-kernel
 action mapping table.
 
+The relay is the coordination surface: the daemon reconciles event
+chains from the relay on startup (`reconcile_all_from_relay`) and
+publishes signed events with retry. The `POST /api/escrow/:id/action`
+endpoint accepts client-signed kind 7301 events so a browser holding
+the user's Nostr key can submit actions without the daemon re-signing.
+
 The reference implementation is [`pontmore/pontmore`](https://github.com/pontmore/pontmore)
 (`pontmored` daemon + economic connector framework). Our MVP wraps LDK
 primitives as connector-compatible typed effects (`escrow_secure`,

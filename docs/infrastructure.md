@@ -51,7 +51,10 @@ to make the proof mandatory; otherwise the header is verified when
 present and ignored when absent. Signed authorization for
 `swap/fiat_sent`, `core/secure`, and dispute resolution remains a
 separate Nostr-protocol concern: those actions live on the 7300 chain,
-not in HTTP headers.
+not in HTTP headers. The `POST /api/escrow/:id/action` endpoint accepts
+a client-signed kind 7301 event directly, so a browser that holds the
+user's Nostr key can submit `swap/fiat_sent` and `core/accept` without
+the daemon re-signing on the user's behalf.
 
 ### Trust model
 
@@ -83,14 +86,22 @@ attestation oracle. Fiat is trusted on the honour system for the MVP.
 Post-MVP: attestation oracles, per-reference nullifiers, and reversal
 bonds.
 
-### Relay is a notification channel, not a source of truth
+### Relay is the coordination surface, not a notification afterthought
 
-The daemon acts on HTTP API calls, not on relay events. A missed relay
-publish does not block an escrow transition. The relay is a notification
-channel for clients that subscribe to kind-1059 gift wraps and kind-7301
-action events. The daemon has one default relay URL and ignores publish
-failures (logged via `eprintln`). Post-MVP: query multiple relays with
-`since` before the deadline, wait for EOSE, and treat no reply as
+The daemon treats the relay as the authoritative source of escrow state.
+On startup it fetches kind 7300/7301 event chains for every known escrow
+and merges any events the local store is missing (`reconcile_all_from_relay`).
+HTTP endpoints are thin wrappers: they sign an action event, persist it
+locally, publish it to the relay, and return the reconstructed state.
+The `POST /api/escrow/:id/action` endpoint accepts a client-signed
+kind 7301 event directly — the daemon verifies the signature against
+the root's bound participants and applies it without re-signing.
+
+Publish failures are retried (3 attempts with backoff). A relay that is
+down does not block a transition (the local store is the fallback), but
+the daemon logs the failure and the event remains unpublished until the
+retry succeeds or an operator intervenes. Post-MVP: query multiple
+relays before the deadline, wait for EOSE, and treat no reply as
 unknown.
 
 ### Pontmore protocol alignment
