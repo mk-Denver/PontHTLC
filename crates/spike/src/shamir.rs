@@ -56,6 +56,9 @@ pub fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
     accumulator
 }
 
+// gf_inv(0) returns 0 here (gf_pow(0, 254) = 0). The escrow crate's shamir.rs panics on 0.
+// These two implementations intentionally differ; do not unify without deciding which
+// behavior to keep. See issue #32.
 pub fn gf_inv(value: u8) -> u8 {
     gf_pow(value, 254)
 }

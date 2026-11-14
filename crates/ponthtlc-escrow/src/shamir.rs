@@ -56,11 +56,13 @@ pub fn gf_pow(mut base: u8, mut exponent: u8) -> u8 {
     accumulator
 }
 
+// gf_inv(0) panics here (assert). The spike crate's shamir.rs returns 0 for gf_inv(0).
+// These two implementations intentionally differ; do not unify without deciding which
+// behavior to keep. See issue #32.
 pub fn gf_inv(value: u8) -> u8 {
     assert!(value != 0, "gf_inv: zero has no inverse in GF(256)");
     gf_pow(value, 254)
 }
-
 pub fn eval_poly(coeffs: &[u8; 2], x: u8) -> u8 {
     let mut value: u8 = coeffs[0];
     let mut x_power: u8 = 1;
