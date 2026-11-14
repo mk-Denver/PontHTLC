@@ -32,6 +32,13 @@ A passing run prints `SPIKE_RESULT: PASS scenario=<scenario>`.
 Before submitting changes that touch the LDK wiring or event pump, verify
 all three scenarios still pass.
 
+Changes that touch HTTP handlers or the escrow store must also pass the
+unit tests (`cargo test -p ponthtlc --lib`, 24 tests) and the API
+integration test (`cargo test -p ponthtlc --test api_happy`, requires
+bitcoind on port 18923). The daemon uses per-escrow `tokio::sync::Mutex`
+locks on all mutating handlers — any new handler that reads or writes
+escrow state must acquire `state.lock_for_escrow(&id)` first.
+
 ## Commit conventions
 
 - Conventional commit messages (`feat:`, `fix:`, `docs:`, `refactor:`).

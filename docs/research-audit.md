@@ -2,6 +2,16 @@
 
 Audit date: 4 November 2026. This document is the deliverable for issue 20. It records gaps, failure modes, and improvements. It does not change protocol code, application code, or the research notes it cites.
 
+> **Post-audit note (November 2026):** The findings in this document were
+> addressed by PRs #40–#47. The codebase on `origin/main` no longer
+> matches the state described below (`06d014a`). Key changes: the daemon
+> now signs through the reducer (`apply_action`), persists durable
+> intents before LDK calls, holds s3 as the resolver, publishes agent +
+> descriptor + root to the relay, reconciles event chains on startup,
+> accepts client-signed kind 7301 events, and uses direction-aware
+> signing keys. Read this audit as a historical record, not a description
+> of the current code.
+
 ## What was read
 
 Research sources are `pontmore/research` on GitHub `main`, fetched 4 November 2026:
