@@ -261,6 +261,17 @@ pub struct AppState<N: HoldNode> {
     pub nostr_secret: [u8; 32],
     pub relay_url: Option<String>,
     pub require_auth: bool,
+    pub escrow_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl<N: HoldNode> AppState<N> {
+    fn lock_for_escrow(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.escrow_locks.lock().expect("escrow locks mutex poisoned");
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
@@ -325,7 +336,7 @@ fn apply_cors(headers: &mut HeaderMap, origin: Option<&HeaderValue>) {
 async fn nostr_auth<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, req: Request, next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    if req.uri().path() == "/health/live" || req.uri().path() == "/api/ws" {
+    if req.uri().path() == "/health/live" {
         return Ok(next.run(req).await);
     }
     let (parts, body) = req.into_parts();
@@ -333,17 +344,16 @@ async fn nostr_auth<N: HoldNode>(
         let event = decode_auth_event(auth).ok_or_else(|| {
             (StatusCode::UNAUTHORIZED, "X-Nostr-Auth is not a valid kind-27235 event".to_string())
         })?;
-        let payload = if event.tag_value("payload").is_some() {
-            Some(
-                axum::body::to_bytes(body, 1024 * 1024)
-                    .await
-                    .map_err(|_| (StatusCode::UNAUTHORIZED, "failed to read request body".to_string()))?,
-            )
+        let bytes = axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "failed to read request body".to_string()))?;
+        if let Some(expected_hash) = event.tag_value("payload") {
+            verify_auth_event(&event, &parts, Some(&bytes))?;
+            let _ = expected_hash;
         } else {
-            None
-        };
-        verify_auth_event(&event, &parts, payload.as_ref())?;
-        let request = Request::from_parts(parts, axum::body::Body::from(payload.unwrap_or_default()));
+            verify_auth_event(&event, &parts, None)?;
+        }
+        let request = Request::from_parts(parts, axum::body::Body::from(bytes));
         return Ok(next.run(request).await);
     }
     if state.require_auth {
@@ -655,7 +665,11 @@ fn hold_invoice_expiry_secs(fiat_confirm_by: u64, now: u64) -> Result<u32, (Stat
             "fiat confirm window has already elapsed; refusing to mint a hold invoice".to_string(),
         ));
     }
-    let horizon = confirm_remaining + timing::HTLC_GRACE;
+    let horizon = confirm_remaining
+        .checked_add(timing::HTLC_GRACE)
+        .ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "hold invoice expiry overflows u64".to_string())
+        })?;
     if horizon > u32::MAX as u64 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -833,6 +847,8 @@ async fn fund_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
     Json(body): Json<PayRequest>,
 ) -> Result<Json<PayResponse>, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let payer = owner_from_headers(&headers)?;
     let owns_invoice = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -860,6 +876,12 @@ async fn fund_escrow<N: HoldNode>(
                 .map_err(action_error)?;
         (accept_event, secure_event)
     };
+    commit_actions(&state, &id, vec![accept_event.clone(), secure_event.clone()])
+        .map_err(action_error)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "secured");
+    }
     let payment_hash = state.node.pay(&body.bolt11).map_err(bad_request)?;
     let payment_hash_hex = hex::encode(payment_hash);
     state
@@ -878,12 +900,6 @@ async fn fund_escrow<N: HoldNode>(
             body.seller_lightning_address.as_deref().unwrap_or(""),
         )
         .map_err(bad_request)?;
-    commit_actions(&state, &id, vec![accept_event.clone(), secure_event.clone()])
-        .map_err(action_error)?;
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "secured");
-    }
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[accept_event, secure_event]).await;
     Ok(Json(PayResponse { payment_hash: payment_hash_hex }))
@@ -918,6 +934,8 @@ async fn accept_escrow<N: HoldNode>(
 async fn lock_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let _owner = owner_from_headers(&headers)?;
     let bolt11 = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -935,12 +953,12 @@ async fn lock_escrow<N: HoldNode>(
         return Err((StatusCode::BAD_REQUEST, "no hold invoice to lock".to_string()));
     }
     let secure_event = prepare_action(&state, &id, "core/secure", None).map_err(action_error)?;
-    state.node.pay(&bolt11).map_err(bad_request)?;
     commit_actions(&state, &id, vec![secure_event.clone()]).map_err(action_error)?;
     {
         let mut store = state.store.lock().expect("escrow store mutex poisoned");
         let _ = store.mark_protocol_status(&id, "secured");
     }
+    state.node.pay(&bolt11).map_err(bad_request)?;
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[secure_event]).await;
     Ok(StatusCode::OK)
@@ -1017,6 +1035,8 @@ async fn fiat_confirmed<N: HoldNode>(
 async fn fail_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let owner = owner_from_headers(&headers)?;
     let payment_hash = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
@@ -1046,6 +1066,12 @@ async fn fail_escrow<N: HoldNode>(
             .map_err(action_error)?;
         (auth_event, refund_event)
     };
+    commit_actions(&state, &id, vec![auth_event.clone(), refund_event.clone()])
+        .map_err(action_error)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "refunded");
+    }
     state.node.fail(payment_hash).map_err(bad_request)?;
     state
         .store
@@ -1053,12 +1079,6 @@ async fn fail_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_fail_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
-    commit_actions(&state, &id, vec![auth_event.clone(), refund_event.clone()])
-        .map_err(action_error)?;
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "refunded");
-    }
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[auth_event, refund_event]).await;
     Ok(StatusCode::OK)
@@ -1223,14 +1243,20 @@ async fn resolve_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let owner = owner_from_headers(&headers)?;
     let payment_hash_hex = {
         let store = state.store.lock().expect("escrow store mutex poisoned");
         let record = store
             .get(&id)
-            .filter(|record| record.owner == owner || record.seller_owner == owner)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
         record.payment_hash.clone()
+    };
+    let root_resolver = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let reduced = reduce_chain(&store, &id).map_err(chain_error)?;
+        reduced.root.resolver.clone()
     };
     let resolve_event = match body.event {
         Some(event) => {
@@ -1241,6 +1267,12 @@ async fn resolve_escrow<N: HoldNode>(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "resolution event must be a kind 7301 action".to_string(),
+                ));
+            }
+            if event.pubkey != root_resolver {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "resolution event must be signed by the resolver bound in the swap root".to_string(),
                 ));
             }
             let content: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
@@ -1263,6 +1295,14 @@ async fn resolve_escrow<N: HoldNode>(
             event
         }
         None => {
+            {
+                let store = state.store.lock().expect("escrow store mutex poisoned");
+                let record = store
+                    .get(&id)
+                    .filter(|record| record.owner == owner || record.seller_owner == owner)
+                    .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+                let _ = record;
+            }
             if body.policy.as_deref() != Some(RESOLUTION_POLICY) {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -1316,23 +1356,41 @@ async fn resolve_escrow<N: HoldNode>(
         }
         None => None,
     };
-    let mut follow_up = Vec::new();
+    let mut all_events = vec![resolve_event.clone()];
     let final_status = match next.status {
         SwapStatus::SettlementAuthorized => {
             let preimage = preimage.ok_or_else(|| {
                 (StatusCode::BAD_REQUEST, "preimage is required for authorize_settlement".to_string())
             })?;
-            state.node.claim(preimage, payment_hash).map_err(bad_request)?;
             if let Some((event, _)) = settle_event {
-                follow_up.push(event);
+                all_events.push(event);
             }
+            {
+                let mut store = state.store.lock().expect("escrow store mutex poisoned");
+                store
+                    .append_events(&id, &all_events)
+                    .map_err(|_| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
+                    })?;
+                let _ = store.mark_protocol_status(&id, "settled");
+            }
+            state.node.claim(preimage, payment_hash).map_err(bad_request)?;
             "settled"
         }
         SwapStatus::RefundAuthorized => {
-            state.node.fail(payment_hash).map_err(bad_request)?;
             if let Some((event, _)) = refund_event {
-                follow_up.push(event);
+                all_events.push(event);
             }
+            {
+                let mut store = state.store.lock().expect("escrow store mutex poisoned");
+                store
+                    .append_events(&id, &all_events)
+                    .map_err(|_| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
+                    })?;
+                let _ = store.mark_protocol_status(&id, "refunded");
+            }
+            state.node.fail(payment_hash).map_err(bad_request)?;
             "refunded"
         }
         _ => {
@@ -1342,22 +1400,8 @@ async fn resolve_escrow<N: HoldNode>(
             ));
         }
     };
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        store.append_event(&id, resolve_event.clone()).map_err(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution".to_string())
-        })?;
-        for event in &follow_up {
-            store.append_event(&id, event.clone()).map_err(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "failed to append settlement".to_string())
-            })?;
-        }
-        let _ = store.mark_protocol_status(&id, final_status);
-    }
     let relay_url = state.relay_url.clone();
-    let mut published = vec![resolve_event];
-    published.extend(follow_up);
-    publish_events(&relay_url, &published).await;
+    publish_events(&relay_url, &all_events).await;
     Ok(Json(ResolveResponse { protocol_status: final_status.to_string() }))
 }
 
@@ -1451,6 +1495,8 @@ async fn claim_escrow<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
     Json(body): Json<ClaimRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let lock = state.lock_for_escrow(&id);
+    let _guard = lock.lock().await;
     let owner = owner_from_headers(&headers)?;
     let preimage = decode_fixed_hex(&body.preimage, "preimage")?;
     let stored_hash = {
@@ -1493,6 +1539,17 @@ async fn claim_escrow<N: HoldNode>(
             .map_err(action_error)?;
         (fiat_sent_event, fiat_confirmed_event, auth_event, settle_event)
     };
+    let all_events = vec![
+        fiat_sent_event.clone(),
+        fiat_confirmed_event.clone(),
+        auth_event.clone(),
+        settle_event.clone(),
+    ];
+    commit_actions(&state, &id, all_events.clone()).map_err(action_error)?;
+    {
+        let mut store = state.store.lock().expect("escrow store mutex poisoned");
+        let _ = store.mark_protocol_status(&id, "settled");
+    }
     state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     state
         .store
@@ -1500,21 +1557,6 @@ async fn claim_escrow<N: HoldNode>(
         .expect("escrow store mutex poisoned")
         .mark_claim_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
-    commit_actions(
-        &state,
-        &id,
-        vec![
-            fiat_sent_event.clone(),
-            fiat_confirmed_event.clone(),
-            auth_event.clone(),
-            settle_event.clone(),
-        ],
-    )
-    .map_err(action_error)?;
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "settled");
-    }
     let relay_url = state.relay_url.clone();
     publish_events(
         &relay_url,
@@ -1622,8 +1664,13 @@ fn new_id() -> String {
 
 async fn publish_event(relay_url: &Option<String>, event: &NostrEvent) {
     if let Some(url) = relay_url {
-        if let Ok(relay) = Relay::connect(url).await {
-            let _ = relay.publish(event).await;
+        match Relay::connect(url).await {
+            Ok(relay) => {
+                if let Err(e) = relay.publish(event).await {
+                    eprintln!("[warn] relay publish failed for event {}: {e}", event.id);
+                }
+            }
+            Err(e) => eprintln!("[warn] relay connect failed for {url}: {e}"),
         }
     }
 }
@@ -1671,12 +1718,14 @@ fn commit_actions<N: HoldNode>(
 ) -> Result<(), ActionError> {
     let mut store = state.store.lock().expect("escrow store mutex poisoned");
     let mut reduced = reduce_chain(&store, escrow_id).map_err(ActionError::Internal)?;
-    for event in events {
-        reduced = apply_action(&reduced, &event, false).map_err(|e| {
+    for event in &events {
+        reduced = apply_action(&reduced, event, false).map_err(|e| {
             ActionError::Internal(format!("chain changed before commit: {e}"))
         })?;
-        store.append_event(escrow_id, event).map_err(ActionError::Internal)?;
     }
+    store
+        .append_events(escrow_id, &events)
+        .map_err(ActionError::Internal)?;
     Ok(())
 }
 
@@ -1846,6 +1895,7 @@ mod tests {
             nostr_secret: [9u8; 32],
             relay_url: None,
             require_auth: false,
+            escrow_locks: Mutex::new(std::collections::HashMap::new()),
         });
         (router(state), fails)
     }
@@ -2487,6 +2537,7 @@ mod tests {
             nostr_secret: [9u8; 32],
             relay_url: None,
             require_auth: true,
+            escrow_locks: Mutex::new(std::collections::HashMap::new()),
         });
         let application = router(state);
         let event = auth_event(&secret, "GET", "/api/escrows", 0);
@@ -2516,6 +2567,7 @@ mod tests {
             nostr_secret: [9u8; 32],
             relay_url: None,
             require_auth: true,
+            escrow_locks: Mutex::new(std::collections::HashMap::new()),
         });
         let application = router(state);
 

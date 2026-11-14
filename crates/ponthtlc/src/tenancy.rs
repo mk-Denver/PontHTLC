@@ -345,22 +345,31 @@ impl EscrowStore {
     }
 
     pub fn append_event(&mut self, escrow_id: &str, event: NostrEvent) -> Result<String, String> {
+        self.append_events(escrow_id, &[event])
+    }
+
+    pub fn append_events(&mut self, escrow_id: &str, events: &[NostrEvent]) -> Result<String, String> {
+        if events.is_empty() {
+            return Ok(String::new());
+        }
         let chain = self
             .state
             .event_chains
             .entry(escrow_id.to_string())
             .or_default();
-        chain.push(event.clone());
-        let event_id = event.id.clone();
+        let last_id = events.last().unwrap().id.clone();
+        for event in events {
+            chain.push(event.clone());
+        }
         let record = self
             .state
             .escrows
             .iter_mut()
             .find(|record| record.id == escrow_id)
             .ok_or_else(|| "escrow not found".to_string())?;
-        record.tip_id = Some(event_id.clone());
+        record.tip_id = Some(last_id.clone());
         self.persist()?;
-        Ok(event_id)
+        Ok(last_id)
     }
 
     pub fn get_events(&self, escrow_id: &str) -> Vec<NostrEvent> {

@@ -63,6 +63,7 @@ async fn main() {
         nostr_secret,
         relay_url: Some(relay_url),
         require_auth: cfg.require_auth,
+        escrow_locks: Mutex::new(HashMap::new()),
     });
     ponthtlc::http::spawn_auto_payout(Arc::clone(&state));
     let app = router(state);
