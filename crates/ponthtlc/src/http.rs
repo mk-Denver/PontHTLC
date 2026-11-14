@@ -746,6 +746,16 @@ async fn create_escrow<N: HoldNode>(
         }
     }
 
+    if let Some(ref qc) = body.quote_commitment {
+        if qc.algorithm != "sha256-bytes@1" {
+            return Err((StatusCode::BAD_REQUEST, "quote_commitment.algorithm must be sha256-bytes@1".to_string()));
+        }
+        let digest = &qc.digest;
+        if !digest.starts_with("sha256:") || digest.len() != 7 + 64 || !digest[7..].chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err((StatusCode::BAD_REQUEST, "quote_commitment.digest must be sha256:<64 hex>".to_string()));
+        }
+    }
+
     let bolt11_invoice =
         state.node.register_hold(payment_hash, body.amount_msat, hold_invoice_expiry)
             .map_err(bad_request)?;
@@ -772,8 +782,9 @@ async fn create_escrow<N: HoldNode>(
             .map_err(bad_request)?;
     let descriptor_id = descriptor_event.id.clone();
 
+    let external_customer = body.customer_pubkey.is_some();
     let root_input = ponthtlc_protocol::events::RootInput {
-        signer_pubkey: customer_pk.clone(),
+        signer_pubkey: if external_customer { agent_pk.clone() } else { customer_pk.clone() },
         agent: agent_pk.clone(),
         customer: customer_pk.clone(),
         escrow: escrow_pk.clone(),
@@ -810,8 +821,12 @@ async fn create_escrow<N: HoldNode>(
         }),
     };
     let root_template = ponthtlc_protocol::events::root_template(&root_input);
-    let customer_secret = secret_for_role(&state.nostr_secret, "customer");
-    let root_event = ponthtlc_protocol::events::sign_event(root_template, &customer_secret)
+    let root_signing_secret = if external_customer {
+        state.nostr_secret
+    } else {
+        secret_for_role(&state.nostr_secret, "customer")
+    };
+    let root_event = ponthtlc_protocol::events::sign_event(root_template, &root_signing_secret)
         .map_err(bad_request)?;
     let root_id = root_event.id.clone();
     let relay_url = state.relay_url.clone();
@@ -1846,15 +1861,15 @@ fn role_for_action(action: &str, direction: &Direction) -> &'static str {
             Direction::FiatToBtc => "agent",
             Direction::BtcToFiat => "customer",
         },
-        "core/accept" => match direction {
-            Direction::FiatToBtc => "agent",
-            Direction::BtcToFiat => "agent",
-        },
+        "core/accept" => "agent",
         "core/authorize_settlement" => match direction {
             Direction::FiatToBtc => "agent",
-            Direction::BtcToFiat => "agent",
+            Direction::BtcToFiat => "customer",
         },
-        "core/authorize_refund" => "agent",
+        "core/authorize_refund" => match direction {
+            Direction::FiatToBtc => "agent",
+            Direction::BtcToFiat => "customer",
+        },
         "core/expire" => "agent",
         "core/open_dispute" => "agent",
         "core/secure" | "core/settle" | "core/refund" => "escrow",
