@@ -37,7 +37,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["ponthtlc", "--relay-url", "ws://nostr-relay:7777"]
+    command: ["--relay-url", "ws://nostr-relay:7777"]
     depends_on:
       bitcoind:
         condition: service_healthy

@@ -568,6 +568,7 @@ async fn list_offers<N: HoldNode>(
 
 pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
     let inflight = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let mut rx = state.node.subscribe();
     {
         let pending = state.store.lock().expect("escrow store mutex poisoned").pending_intents();
         for record in &pending {
@@ -581,7 +582,6 @@ pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
         }
     }
     tokio::spawn(async move {
-        let mut rx = state.node.subscribe();
         let mut retry = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -1095,13 +1095,13 @@ async fn fail_escrow<N: HoldNode>(
     };
     commit_actions(&state, &id, vec![auth_event.clone(), refund_event.clone()])
         .map_err(action_error)?;
-    state.node.fail(payment_hash).map_err(bad_request)?;
     state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
         .mark_fail_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    state.node.fail(payment_hash).map_err(bad_request)?;
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[auth_event, refund_event]).await;
     Ok(StatusCode::OK)
@@ -1395,12 +1395,9 @@ async fn resolve_escrow<N: HoldNode>(
                     .map_err(|_| {
                         (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
                     })?;
-            }
-            state.node.claim(preimage, payment_hash).map_err(bad_request)?;
-            {
-                let mut store = state.store.lock().expect("escrow store mutex poisoned");
                 let _ = store.mark_protocol_status(&id, "claim_pending");
             }
+            state.node.claim(preimage, payment_hash).map_err(bad_request)?;
             "claim_pending"
         }
         SwapStatus::RefundAuthorized => {
@@ -1414,12 +1411,9 @@ async fn resolve_escrow<N: HoldNode>(
                     .map_err(|_| {
                         (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
                     })?;
-            }
-            state.node.fail(payment_hash).map_err(bad_request)?;
-            {
-                let mut store = state.store.lock().expect("escrow store mutex poisoned");
                 let _ = store.mark_protocol_status(&id, "fail_pending");
             }
+            state.node.fail(payment_hash).map_err(bad_request)?;
             "fail_pending"
         }
         _ => {
@@ -1575,13 +1569,13 @@ async fn claim_escrow<N: HoldNode>(
         settle_event.clone(),
     ];
     commit_actions(&state, &id, all_events.clone()).map_err(action_error)?;
-    state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
         .mark_claim_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     let relay_url = state.relay_url.clone();
     publish_events(
         &relay_url,

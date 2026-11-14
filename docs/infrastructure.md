@@ -61,13 +61,16 @@ management, block sync). The host does not start with P, but the
 until RRP or another resolver-enforceable lock is adopted. Do not treat
 the GF(2^8) split as "non-custodial by math."
 
-The browser tab stores Shamir shares and the Nostr secret in memory
-only; they are not written to `sessionStorage`. When a relay URL is
-configured, offers and BOLT11 invoices travel via NIP-59 gift wraps, not
-the cleartext `BroadcastChannel` (which is a same-origin demo bus for
-local development). A page script on the hosted origin can still read
-in-memory state while the tab is open — the hosted page is inside the
-trust boundary.
+The browser tab keeps the Nostr secret and received Shamir shares in
+memory; the `Session` persistence layer no longer writes `secret` or
+`shares` to `sessionStorage`. However, the seller handoff page
+(`NewSwap.svelte`) writes all three shares to a per-escrow
+`sessionStorage` key for manual copy/paste, and `wallet.svelte.ts`
+persists the wallet secret in `sessionStorage`. A page script on the
+hosted origin can read these — the hosted page is inside the trust
+boundary. Offers and BOLT11 invoices travel on the same-origin
+`BroadcastChannel` (a demo bus); NIP-59 gift wraps carry share delivery
+when a relay is configured.
 
 ### Pontmore protocol alignment
 
@@ -100,8 +103,10 @@ different providers can peer via Lightning network.
 
 ```
 1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
-2. Seller delivers s1 to the buyer and s3 to the arbitrator via NIP-59 gift wrap (or BroadcastChannel
-   in local-demo mode) at originate time, before the hold invoice exists
+2. Seller delivers s1 to the buyer and s3 to the arbitrator. In the shipped UI this is a
+   per-escrow sessionStorage handoff rendered for manual copy/paste; when a relay URL is
+   configured, s1 and s3 also travel as NIP-59 gift wraps. This happens at originate time,
+   before the hold invoice exists.
 3. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
 4. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
 5. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)

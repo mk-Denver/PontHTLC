@@ -272,14 +272,12 @@ export class Session {
       if (isHex64(arb)) {
         this.arb = arb;
       }
-      if (!this.relayUrl) {
-        this.#bus?.send({
-          type: "offer",
-          paymentHash,
-          amountMsat,
-          seller: this.pubkey,
-        });
-      }
+      this.#bus?.send({
+        type: "offer",
+        paymentHash,
+        amountMsat,
+        seller: this.pubkey,
+      });
       await this.sendShare(paymentHash, SHARE_X_BUYER, buyer);
       if (isHex64(arb)) {
         await this.sendShare(paymentHash, SHARE_X_ARBITRATOR, arb);
@@ -309,15 +307,13 @@ export class Session {
       });
       this.peer = offer.seller;
       this.selectedId = created.id;
-      if (!this.relayUrl) {
-        this.#bus?.send({
-          type: "invoice",
-          escrowId: created.id,
-          bolt11: created.bolt11_invoice,
-          paymentHash: offer.paymentHash,
-          buyer: this.pubkey,
-        });
-      }
+      this.#bus?.send({
+        type: "invoice",
+        escrowId: created.id,
+        bolt11: created.bolt11_invoice,
+        paymentHash: offer.paymentHash,
+        buyer: this.pubkey,
+      });
       await this.refresh();
       this.notice = "Hold invoice created. Share it with the seller.";
       this.persist();
@@ -339,15 +335,13 @@ export class Session {
       createdAt: Date.now(),
     });
     this.selectedId = created.id;
-    if (!this.relayUrl) {
-      this.#bus?.send({
-        type: "invoice",
-        escrowId: created.id,
-        bolt11: created.bolt11_invoice,
-        paymentHash: created.payment_hash,
-        buyer: this.pubkey,
-      });
-    }
+    this.#bus?.send({
+      type: "invoice",
+      escrowId: created.id,
+      bolt11: created.bolt11_invoice,
+      paymentHash: created.payment_hash,
+      buyer: this.pubkey,
+    });
     await this.refresh();
     this.persist();
     return created;
