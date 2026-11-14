@@ -33,7 +33,7 @@ resolver-enforceable escrow (that would need RRP, which is post-MVP).
 | **Node operator** | Service provider (1 per region) | `ponthtlc` daemon + bitcoind + Nostr relay | ~$20-50/mo VPS |
 | **Buyer** | User (browser) | Nostr keypair, receives s1, reconstructs P when a second share is released, calls claim/fail via API | $0 |
 | **Seller** | User (browser) | Nostr keypair, samples P, holds all shares at split time, funds invoice via hosted node | $0 |
-| **Arbitrator** | Nostr-only process | May hold s3. Cannot force settlement without a recoverable-preimage design | $0 |
+| **Arbitrator** | Nostr-only process | The daemon (node operator) holds s3 as the resolver. Cannot force settlement without a recoverable-preimage design, but can release s3 during dispute resolution so the buyer can reconstruct P | $0 |
 
 ### API identity and authentication
 
@@ -123,16 +123,15 @@ different providers can peer via Lightning network.
 ### Preimage flow
 
 ```
-1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
-2. Seller delivers s1 to the buyer and s3 to the arbitrator. In the shipped UI this is a
-   per-escrow sessionStorage handoff rendered for manual copy/paste; when a relay URL is
-   configured, s1 and s3 also travel as NIP-59 gift wraps. This happens at originate time,
-   before the hold invoice exists.
+1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→daemon
+2. Seller delivers s1 to the buyer via NIP-59 gift wrap or sessionStorage handoff at originate time.
+   s3 is submitted to the daemon via POST /api/escrow/:id/arb-share after the escrow is funded.
 3. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
 4. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
 5. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
-6. After fiat, seller releases s2 (or arb sends s3). Buyer reconstructs P client-side.
-   If the seller withholds every path to P, the lock expires and sats return to the seller.
+6. After fiat, seller releases s2 (or the daemon releases s3 during dispute resolution).
+   Buyer reconstructs P client-side. If the seller withholds every path to P, the lock expires
+   and sats return to the seller.
 7. Buyer browser → POST /api/escrow/:id/claim { preimage: P }
 8. Hosted node → claim_funds(P) → pass-through, P not stored by design
 9. Seller's hosted node → PaymentSent (preimage auto-recovered)
