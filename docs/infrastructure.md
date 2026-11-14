@@ -61,6 +61,17 @@ management, block sync). The host does not start with P, but the
 until RRP or another resolver-enforceable lock is adopted. Do not treat
 the GF(2^8) split as "non-custodial by math."
 
+The browser tab keeps the Nostr secret and received Shamir shares in
+memory; the `Session` persistence layer no longer writes `secret` or
+`shares` to `sessionStorage`. However, the seller handoff page
+(`NewSwap.svelte`) writes all three shares to a per-escrow
+`sessionStorage` key for manual copy/paste, and `wallet.svelte.ts`
+persists the wallet secret in `sessionStorage`. A page script on the
+hosted origin can read these — the hosted page is inside the trust
+boundary. Offers and BOLT11 invoices travel on the same-origin
+`BroadcastChannel` (a demo bus); NIP-59 gift wraps carry share delivery
+when a relay is configured.
+
 ### Pontmore protocol alignment
 
 In `pontmore/swap@1` terms:
@@ -92,10 +103,13 @@ different providers can peer via Lightning network.
 
 ```
 1. Seller originates P (seller already knows P), splits 2-of-3 Shamir: s1→buyer, s2→seller, s3→arb
-2. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
-3. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
-4. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
-5. Seller delivers s1 (and may send s3) as a private payload; seller still holds P and s2
+2. Seller delivers s1 to the buyer and s3 to the arbitrator. In the shipped UI this is a
+   per-escrow sessionStorage handoff rendered for manual copy/paste; when a relay URL is
+   configured, s1 and s3 also travel as NIP-59 gift wraps. This happens at originate time,
+   before the hold invoice exists.
+3. Buyer browser → POST /api/escrow/create → buyer-side node calls create_inbound_payment_for_hash(H)
+4. Seller browser → POST /api/escrow/:id/fund → seller-side node pays through the internal channel
+5. Hosted node → PaymentClaimable { preimage: None } fires (hold verified)
 6. After fiat, seller releases s2 (or arb sends s3). Buyer reconstructs P client-side.
    If the seller withholds every path to P, the lock expires and sats return to the seller.
 7. Buyer browser → POST /api/escrow/:id/claim { preimage: P }

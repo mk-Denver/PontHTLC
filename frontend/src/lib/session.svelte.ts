@@ -44,13 +44,11 @@ export type Peer = {
 type Persisted = {
   role: Role;
   name: string;
-  secret: string;
   pubkey: string;
   peer: string;
   arb: string;
   relay: string;
   trades: Trade[];
-  shares: Record<string, ShareMap>;
   peers: Peer[];
 };
 
@@ -618,13 +616,11 @@ export class Session {
       const parsed = JSON.parse(raw) as Persisted;
       this.role = parsed.role;
       this.name = parsed.name ?? defaultName(parsed.role);
-      this.secret = parsed.secret;
-      this.pubkey = parsed.pubkey || pubkeyFromSecret(hexToBytes(parsed.secret));
+      this.pubkey = parsed.pubkey ?? "";
       this.peer = parsed.peer ?? "";
       this.arb = parsed.arb ?? "";
       this.relayUrl = parsed.relay ?? "";
       this.trades = parsed.trades ?? [];
-      this.shares = parsed.shares ?? {};
       this.peers = parsed.peers ?? [];
     } catch {
       sessionStorage.removeItem(SESSION_KEY);
@@ -638,13 +634,11 @@ export class Session {
     const payload: Persisted = {
       role: this.role,
       name: this.name,
-      secret: this.secret,
       pubkey: this.pubkey,
       peer: this.peer,
       arb: this.arb,
       relay: this.relayUrl,
       trades: this.trades,
-      shares: this.shares,
       peers: this.peers,
     };
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));

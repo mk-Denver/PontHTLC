@@ -568,8 +568,20 @@ async fn list_offers<N: HoldNode>(
 
 pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
     let inflight = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let mut rx = state.node.subscribe();
+    {
+        let pending = state.store.lock().expect("escrow store mutex poisoned").pending_intents();
+        for record in &pending {
+            if record.protocol_status == "fail_pending" {
+                if let Ok(hash) = hex::decode(&record.payment_hash) {
+                    let hash: [u8; 32] = hash.as_slice().try_into().unwrap_or([0u8; 32]);
+                    eprintln!("[reconcile] re-failing escrow {} (fail_pending)", record.id);
+                    let _ = state.node.fail(hash);
+                }
+            }
+        }
+    }
     tokio::spawn(async move {
-        let mut rx = state.node.subscribe();
         let mut retry = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -577,6 +589,21 @@ pub fn spawn_auto_payout<N: HoldNode + 'static>(state: Arc<AppState<N>>) {
                     match incoming {
                         Ok(event) if event.kind == "PaymentSent" || event.kind == "PaymentFailed" => {
                             if let Some(hash) = event.payment_hash {
+                                {
+                                    let mut store = state.store.lock().expect("escrow store mutex poisoned");
+                                    if let Some(record) = store.by_payment_hash(&hash) {
+                                        let terminal = if event.kind == "PaymentSent" {
+                                            "settled"
+                                        } else {
+                                            "refunded"
+                                        };
+                                        if record.protocol_status == "claim_pending"
+                                            || record.protocol_status == "fail_pending"
+                                        {
+                                            let _ = store.mark_protocol_status(&record.id, terminal);
+                                        }
+                                    }
+                                }
                                 let _ = payout_hash(&state, &inflight, &event.kind, &hash).await;
                             }
                         }
@@ -774,7 +801,7 @@ async fn create_escrow<N: HoldNode>(
         let _ = store.append_event(&id, descriptor_event.clone());
         let _ = store.append_event(&id, root_event.clone());
     }
-    publish_event(&relay_url, &root_event).await;
+    publish_events(&relay_url, &[agent_event, descriptor_event, root_event]).await;
     Ok(Json(CreateResponse { id, payment_hash: payment_hash_hex, bolt11_invoice }))
 }
 
@@ -1068,17 +1095,13 @@ async fn fail_escrow<N: HoldNode>(
     };
     commit_actions(&state, &id, vec![auth_event.clone(), refund_event.clone()])
         .map_err(action_error)?;
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "refunded");
-    }
-    state.node.fail(payment_hash).map_err(bad_request)?;
     state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
         .mark_fail_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    state.node.fail(payment_hash).map_err(bad_request)?;
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[auth_event, refund_event]).await;
     Ok(StatusCode::OK)
@@ -1372,10 +1395,10 @@ async fn resolve_escrow<N: HoldNode>(
                     .map_err(|_| {
                         (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
                     })?;
-                let _ = store.mark_protocol_status(&id, "settled");
+                let _ = store.mark_protocol_status(&id, "claim_pending");
             }
             state.node.claim(preimage, payment_hash).map_err(bad_request)?;
-            "settled"
+            "claim_pending"
         }
         SwapStatus::RefundAuthorized => {
             if let Some((event, _)) = refund_event {
@@ -1388,10 +1411,10 @@ async fn resolve_escrow<N: HoldNode>(
                     .map_err(|_| {
                         (StatusCode::INTERNAL_SERVER_ERROR, "failed to append resolution events".to_string())
                     })?;
-                let _ = store.mark_protocol_status(&id, "refunded");
+                let _ = store.mark_protocol_status(&id, "fail_pending");
             }
             state.node.fail(payment_hash).map_err(bad_request)?;
-            "refunded"
+            "fail_pending"
         }
         _ => {
             return Err((
@@ -1546,17 +1569,13 @@ async fn claim_escrow<N: HoldNode>(
         settle_event.clone(),
     ];
     commit_actions(&state, &id, all_events.clone()).map_err(action_error)?;
-    {
-        let mut store = state.store.lock().expect("escrow store mutex poisoned");
-        let _ = store.mark_protocol_status(&id, "settled");
-    }
-    state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     state
         .store
         .lock()
         .expect("escrow store mutex poisoned")
         .mark_claim_submitted(&id, &owner)
         .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    state.node.claim(preimage, payment_hash).map_err(bad_request)?;
     let relay_url = state.relay_url.clone();
     publish_events(
         &relay_url,

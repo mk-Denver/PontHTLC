@@ -189,7 +189,7 @@ impl EscrowStore {
             .find(|record| record.id == id && record.owner == owner)
             .ok_or_else(|| "escrow not found".to_string())?;
         record.state = "claim_submitted".to_string();
-        record.protocol_status = "settled".to_string();
+        record.protocol_status = "claim_pending".to_string();
         self.persist()
     }
 
@@ -201,7 +201,7 @@ impl EscrowStore {
             .find(|record| record.id == id && record.owner == owner)
             .ok_or_else(|| "escrow not found".to_string())?;
         record.state = "fail_submitted".to_string();
-        record.protocol_status = "refunded".to_string();
+        record.protocol_status = "fail_pending".to_string();
         self.persist()
     }
 
@@ -233,6 +233,17 @@ impl EscrowStore {
             .iter()
             .find(|record| record.payment_hash == payment_hash)
             .cloned()
+    }
+
+    pub fn pending_intents(&self) -> Vec<EscrowRecord> {
+        self.state
+            .escrows
+            .iter()
+            .filter(|record| {
+                record.protocol_status == "claim_pending" || record.protocol_status == "fail_pending"
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn balance_of(&self, owner: &str) -> u64 {
