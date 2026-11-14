@@ -1,2 +1,15 @@
 node_modules
 dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.dockerignore
+*.log
+npm-debug.log*
+.vscode
+.idea
+.DS_Store

@@ -4,14 +4,13 @@ import { generateKeypair } from "./nostr";
 const KEY = "ponthtlc.wallet";
 
 type Saved = {
-  secret: string;
   pubkey: string;
   name: string;
   lightningAddress: string;
   isAgent: boolean;
 };
 
-function fresh(): Saved {
+function fresh(): { secret: string; pubkey: string; name: string; lightningAddress: string; isAgent: boolean } {
   const keys = generateKeypair();
   return {
     secret: bytesToHex(keys.secret),
@@ -22,20 +21,25 @@ function fresh(): Saved {
   };
 }
 
-function load(): Saved {
+function load(): { secret: string; pubkey: string; name: string; lightningAddress: string; isAgent: boolean } {
   try {
     const raw = sessionStorage.getItem(KEY);
     if (raw) {
       const saved = JSON.parse(raw) as Saved;
-      if (saved.secret && saved.pubkey) {
-        return saved;
+      if (saved.pubkey) {
+        return {
+          secret: "",
+          pubkey: saved.pubkey,
+          name: saved.name ?? "",
+          lightningAddress: saved.lightningAddress ?? "",
+          isAgent: saved.isAgent ?? false,
+        };
       }
     }
   } catch {
-    /* a broken saved wallet starts over */
   }
   const saved = fresh();
-  sessionStorage.setItem(KEY, JSON.stringify(saved));
+  sessionStorage.setItem(KEY, JSON.stringify({ pubkey: saved.pubkey, name: saved.name, lightningAddress: saved.lightningAddress, isAgent: saved.isAgent }));
   return saved;
 }
 
@@ -61,7 +65,6 @@ export class WalletSession {
     sessionStorage.setItem(
       KEY,
       JSON.stringify({
-        secret: this.secret,
         pubkey: this.pubkey,
         name: this.name,
         lightningAddress: this.lightningAddress,

@@ -71,13 +71,21 @@ export function openRelay(
   socket.onmessage = (event) => {
     try {
       const parsed = JSON.parse(String(event.data)) as unknown[];
-      if (parsed[0] === "EVENT" && parsed[2] && typeof parsed[2] === "object") {
+      if (
+        Array.isArray(parsed)
+        && parsed.length >= 3
+        && parsed[0] === "EVENT"
+        && parsed[2] !== null
+        && typeof parsed[2] === "object"
+      ) {
         onWrap(parsed[2] as NostrEvent);
       }
     } catch {
       return;
     }
   };
+  socket.onerror = () => {};
+  socket.onclose = () => {};
   return {
     publish: (nostrEvent) => {
       if (socket.readyState === WebSocket.OPEN) {

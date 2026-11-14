@@ -24,7 +24,11 @@ test-fail: bitcoind
 test-hold: bitcoind
 	cargo run -p ponthtlc-spike -- --scenario hold
 
-test-all: test-happy test-fail test-hold
+.NOTPARALLEL: test-all
+test-all: bitcoind
+	cargo run -p ponthtlc-spike -- --scenario happy
+	cargo run -p ponthtlc-spike -- --scenario fail
+	cargo run -p ponthtlc-spike -- --scenario hold
 
 test-api: bitcoind
 	cargo test -p ponthtlc --test api_happy

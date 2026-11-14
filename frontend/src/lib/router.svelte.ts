@@ -4,7 +4,13 @@ export const loc = $state({
 });
 
 function readHash(): string {
-  const raw = decodeURIComponent(location.hash.replace(/^#/, "") || "/");
+  const hashValue = location.hash.replace(/^#/, "") || "/";
+  let raw: string;
+  try {
+    raw = decodeURIComponent(hashValue);
+  } catch {
+    raw = hashValue;
+  }
   return raw.startsWith("/") ? raw : `/${raw}`;
 }
 

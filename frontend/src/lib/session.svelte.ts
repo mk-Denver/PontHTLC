@@ -365,16 +365,23 @@ export class Session {
   }
 
   async release(paymentHash: string, to = "") {
-    const peer = (to || this.tradeFor(paymentHash)?.peer || this.peer).toLowerCase();
-    if (!isHex64(peer)) {
-      throw new Error("counterparty pubkey required");
+    this.busy = "releasing";
+    try {
+      const peer = (to || this.tradeFor(paymentHash)?.peer || this.peer).toLowerCase();
+      if (!isHex64(peer)) {
+        throw new Error("counterparty pubkey required");
+      }
+      const x = this.role === "arbitrator" ? SHARE_X_ARBITRATOR : SHARE_X_SELLER;
+      await this.sendShare(paymentHash, x, peer);
+      this.patchTrade(paymentHash, { released: true });
+      this.notice = x === SHARE_X_ARBITRATOR
+        ? "Arbitrator share sent."
+        : "Seller share sent. Buyer can reconstruct P.";
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.busy = "";
     }
-    const x = this.role === "arbitrator" ? SHARE_X_ARBITRATOR : SHARE_X_SELLER;
-    await this.sendShare(paymentHash, x, peer);
-    this.patchTrade(paymentHash, { released: true });
-    this.notice = x === SHARE_X_ARBITRATOR
-      ? "Arbitrator share sent."
-      : "Seller share sent. Buyer can reconstruct P.";
   }
 
   reconstruct(paymentHash: string): string {
@@ -384,6 +391,9 @@ export class Session {
       throw new Error("need two shares");
     }
     const [a, b] = present;
+    if (a.x === b.x) {
+      throw new Error("need two distinct shares");
+    }
     const preimage = combineShares(shareFromJson(a), shareFromJson(b));
     const hash = bytesToHex(sha256(preimage));
     if (hash !== paymentHash) {
@@ -450,9 +460,13 @@ export class Session {
   }
 
   ingestPastedShare(paymentHash: string, raw: string) {
-    const parsed = JSON.parse(raw) as { x: number; bytes: string };
-    this.rememberShares(paymentHash, [shareFromJson(parsed)]);
-    this.persist();
+    try {
+      const parsed = JSON.parse(raw) as { x: number; bytes: string };
+      this.rememberShares(paymentHash, [shareFromJson(parsed)]);
+      this.persist();
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+    }
   }
 
   shareStatus(paymentHash: string): { held: number[]; ready: boolean } {

@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /src/target/release/ponthtlc /usr/local/bin/ponthtlc
 
+RUN groupadd -r app && useradd -r -g app app && mkdir -p /data && chown app:app /data
+USER app
+
 EXPOSE 9800
 VOLUME /data
 ENTRYPOINT ["ponthtlc"]
