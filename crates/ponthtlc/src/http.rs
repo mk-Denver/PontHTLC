@@ -23,7 +23,7 @@ use ponthtlc_nostr::relay::Relay;
 use ponthtlc_protocol::constants::{timing, DISPUTE_CLASSES, RESOLUTION_POLICY};
 use ponthtlc_protocol::event::{pubkey_from_secret, NostrEvent};
 use ponthtlc_protocol::swap_v1::{
-    apply_action, parse_root, reconstruct, SwapRoot, SwapState, SwapStatus,
+    apply_action, parse_root, reconstruct, Direction, SwapRoot, SwapState, SwapStatus,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -669,6 +669,16 @@ struct CreateRequest {
     payment_channel: Option<String>,
     #[serde(default)]
     buyer_lightning_address: Option<String>,
+    #[serde(default)]
+    customer_pubkey: Option<String>,
+    #[serde(default)]
+    quote_commitment: Option<CommitmentInput>,
+}
+
+#[derive(Deserialize)]
+struct CommitmentInput {
+    algorithm: String,
+    digest: String,
 }
 
 #[derive(Serialize)]
@@ -714,6 +724,38 @@ async fn create_escrow<N: HoldNode>(
     let now = ponthtlc_protocol::event::now();
     let fiat_confirm_by = now + timing::CONFIRM_WINDOW;
     let hold_invoice_expiry = hold_invoice_expiry_secs(fiat_confirm_by, now)?;
+
+    let direction = body.direction.as_deref().unwrap_or("fiat_to_btc");
+    let direction = Direction::from_str(direction)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown direction: {direction}")))?;
+
+    let btc_amount_sats = body.amount_msat / 1000;
+    if btc_amount_sats == 0 || body.amount_msat % 1000 != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "amount_msat must be a positive whole number of sats".to_string(),
+        ));
+    }
+
+    let fiat_currency = body.fiat_currency.clone().unwrap_or_else(|| "USD".to_string());
+    let fiat_amount = body.fiat_amount.clone().unwrap_or_else(|| "1".to_string());
+
+    if let Some(ref cpk) = body.customer_pubkey {
+        if cpk.len() != 64 || !cpk.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err((StatusCode::BAD_REQUEST, "customer_pubkey must be 64 hex characters".to_string()));
+        }
+    }
+
+    if let Some(ref qc) = body.quote_commitment {
+        if qc.algorithm != "sha256-bytes@1" {
+            return Err((StatusCode::BAD_REQUEST, "quote_commitment.algorithm must be sha256-bytes@1".to_string()));
+        }
+        let digest = &qc.digest;
+        if !digest.starts_with("sha256:") || digest.len() != 7 + 64 || !digest[7..].chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err((StatusCode::BAD_REQUEST, "quote_commitment.digest must be sha256:<64 hex>".to_string()));
+        }
+    }
+
     let bolt11_invoice =
         state.node.register_hold(payment_hash, body.amount_msat, hold_invoice_expiry)
             .map_err(bad_request)?;
@@ -721,15 +763,11 @@ async fn create_escrow<N: HoldNode>(
     let payment_hash_hex = hex::encode(payment_hash);
     let signer_pk = pubkey_from_secret(&state.nostr_secret);
     let agent_pk = signer_pk.clone();
-    let customer_pk = pubkey_for_role(&state.nostr_secret, "customer");
+    let customer_pk = body.customer_pubkey.as_ref()
+        .map(|pk| pk.to_ascii_lowercase())
+        .unwrap_or_else(|| pubkey_for_role(&state.nostr_secret, "customer"));
     let escrow_pk = pubkey_for_role(&state.nostr_secret, "escrow");
     let resolver_pk = pubkey_for_role(&state.nostr_secret, "resolver");
-
-    let direction = body.direction.as_deref().unwrap_or("fiat_to_btc");
-    let direction = ponthtlc_protocol::swap_v1::Direction::from_str(direction)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown direction: {direction}")))?;
-    let fiat_currency = body.fiat_currency.clone().unwrap_or_else(|| "USD".to_string());
-    let fiat_amount = body.fiat_amount.clone().unwrap_or_else(|| "1".to_string());
     let payment_channel = body.payment_channel.clone()
         .unwrap_or_else(|| "lightning-hold-invoice@1".to_string());
 
@@ -744,8 +782,9 @@ async fn create_escrow<N: HoldNode>(
             .map_err(bad_request)?;
     let descriptor_id = descriptor_event.id.clone();
 
+    let external_customer = body.customer_pubkey.is_some();
     let root_input = ponthtlc_protocol::events::RootInput {
-        signer_pubkey: customer_pk.clone(),
+        signer_pubkey: if external_customer { agent_pk.clone() } else { customer_pk.clone() },
         agent: agent_pk.clone(),
         customer: customer_pk.clone(),
         escrow: escrow_pk.clone(),
@@ -769,11 +808,25 @@ async fn create_escrow<N: HoldNode>(
             },
         },
         expires_at: now + 1800,
-        commitments: None,
+        commitments: body.quote_commitment.as_ref().map(|qc| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "quote".to_string(),
+                ponthtlc_protocol::swap_v1::CommitmentObject {
+                    algorithm: qc.algorithm.clone(),
+                    digest: qc.digest.clone(),
+                },
+            );
+            map
+        }),
     };
     let root_template = ponthtlc_protocol::events::root_template(&root_input);
-    let customer_secret = secret_for_role(&state.nostr_secret, "customer");
-    let root_event = ponthtlc_protocol::events::sign_event(root_template, &customer_secret)
+    let root_signing_secret = if external_customer {
+        state.nostr_secret
+    } else {
+        secret_for_role(&state.nostr_secret, "customer")
+    };
+    let root_event = ponthtlc_protocol::events::sign_event(root_template, &root_signing_secret)
         .map_err(bad_request)?;
     let root_id = root_event.id.clone();
     let relay_url = state.relay_url.clone();
@@ -1715,7 +1768,7 @@ fn sign_gated(
     reduced: &SwapState, nostr_secret: &[u8; 32], action: &str,
     data: Option<serde_json::Value>,
 ) -> Result<(NostrEvent, SwapState), ActionError> {
-    let secret = secret_for_action(nostr_secret, action);
+    let secret = secret_for_action(nostr_secret, action, &reduced.root.terms.direction);
     let signer_pk = pubkey_from_secret(&secret);
     let template = ponthtlc_protocol::events::action_template(
         &signer_pk,
@@ -1786,21 +1839,43 @@ fn action_error(err: ActionError) -> (StatusCode, String) {
     }
 }
 
-fn secret_for_action(base: &[u8; 32], action: &str) -> [u8; 32] {
+fn secret_for_action(base: &[u8; 32], action: &str, direction: &Direction) -> [u8; 32] {
     let mut derived = *base;
-    match action {
-        "swap/fiat_sent" => derived[0] ^= 0x01,
-        "core/secure" | "core/settle" | "core/refund" => derived[0] ^= 0x02,
-        "core/resolve_dispute" => derived[0] ^= 0x03,
-        "core/accept"
-        | "swap/fiat_confirmed"
-        | "core/authorize_settlement"
-        | "core/authorize_refund"
-        | "core/expire"
-        | "core/open_dispute" => {}
+    let role = role_for_action(action, direction);
+    match role {
+        "customer" => derived[0] ^= 0x01,
+        "escrow" => derived[0] ^= 0x02,
+        "resolver" => derived[0] ^= 0x03,
         _ => {}
     }
     derived
+}
+
+fn role_for_action(action: &str, direction: &Direction) -> &'static str {
+    match action {
+        "swap/fiat_sent" => match direction {
+            Direction::FiatToBtc => "customer",
+            Direction::BtcToFiat => "agent",
+        },
+        "swap/fiat_confirmed" => match direction {
+            Direction::FiatToBtc => "agent",
+            Direction::BtcToFiat => "customer",
+        },
+        "core/accept" => "agent",
+        "core/authorize_settlement" => match direction {
+            Direction::FiatToBtc => "agent",
+            Direction::BtcToFiat => "customer",
+        },
+        "core/authorize_refund" => match direction {
+            Direction::FiatToBtc => "agent",
+            Direction::BtcToFiat => "customer",
+        },
+        "core/expire" => "agent",
+        "core/open_dispute" => "agent",
+        "core/secure" | "core/settle" | "core/refund" => "escrow",
+        "core/resolve_dispute" => "resolver",
+        _ => "agent",
+    }
 }
 
 fn pubkey_for_role(base: &[u8; 32], role: &str) -> String {
