@@ -30,6 +30,8 @@ pub struct EscrowRecord {
     pub seller_owner: String,
     #[serde(default)]
     pub payout: String,
+    #[serde(default)]
+    pub arb_share: String,
 }
 
 impl Default for EscrowRecord {
@@ -48,6 +50,7 @@ impl Default for EscrowRecord {
             seller_lightning_address: String::new(),
             seller_owner: String::new(),
             payout: String::new(),
+            arb_share: String::new(),
         }
     }
 }
@@ -218,6 +221,25 @@ impl EscrowStore {
             .ok_or_else(|| "escrow not found".to_string())?;
         record.protocol_status = "disputed".to_string();
         self.persist()
+    }
+
+    pub fn set_arb_share(&mut self, id: &str, share_hex: &str) -> Result<(), String> {
+        let record = self
+            .state
+            .escrows
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| "escrow not found".to_string())?;
+        record.arb_share = share_hex.to_string();
+        self.persist()
+    }
+
+    pub fn get_arb_share(&self, id: &str) -> Option<String> {
+        self.state
+            .escrows
+            .iter()
+            .find(|record| record.id == id)
+            .map(|record| record.arb_share.clone())
     }
 
     pub fn mark_protocol_status(&mut self, id: &str, status: &str) -> Result<(), String> {

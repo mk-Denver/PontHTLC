@@ -33,7 +33,10 @@ small trades:
 - **Host does not hold P**: the seller samples the preimage and splits it
   2-of-3 Shamir as a private payload. The host starts with zero shares, but
   the seller already knows `P` and can withhold it after fiat is paid
-- **Dispute share**: an arbitrator may hold s3. That share is not
+- **Dispute share**: the daemon (node operator) holds s3 as the resolver.
+  The seller submits s3 to the daemon after funding via
+  `POST /api/escrow/:id/arb-share`. During dispute resolution the daemon
+  can release s3 so the buyer can reconstruct P. That share is not
   cut-and-choose verified; a bad s3 is only discovered when reconstruction
   fails. Resolver-recoverable preimages (RRP) are post-MVP
 - **Low cost**: $0 for users; the operator's VPS serves hundreds of traders

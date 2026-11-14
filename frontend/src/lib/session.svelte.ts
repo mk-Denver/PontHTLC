@@ -355,6 +355,13 @@ export class Session {
         : await api.payInvoice(this.pubkey, invoice.bolt11);
       const hash = invoice.paymentHash || paid.payment_hash;
       this.patchTrade(hash, { funded: true, bolt11: invoice.bolt11, escrowId: invoice.escrowId || this.tradeFor(hash)?.escrowId });
+      const s3 = this.shares[hash]?.[SHARE_X_ARBITRATOR];
+      if (s3 && (invoice.escrowId || this.tradeFor(hash)?.escrowId)) {
+        const escrowId = invoice.escrowId || this.tradeFor(hash)?.escrowId || "";
+        if (escrowId) {
+          await api.submitArbShare(this.pubkey, escrowId, s3.bytes);
+        }
+      }
       this.notice = "Invoice funded. HTLC is held until claim or fail.";
       await this.refresh();
     } catch (err) {

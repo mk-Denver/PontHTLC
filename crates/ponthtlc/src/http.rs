@@ -291,6 +291,7 @@ pub fn router<N: HoldNode + 'static>(state: Arc<AppState<N>>) -> Router {
         .route("/api/escrow/:id/expire", post(expire_escrow::<N>))
         .route("/api/escrow/:id/dispute", post(dispute_escrow::<N>))
         .route("/api/escrow/:id/resolve", post(resolve_escrow::<N>))
+        .route("/api/escrow/:id/arb-share", post(submit_arb_share::<N>))
         .route("/api/escrow/:id/action", post(submit_action::<N>))
         .route("/api/invoice/pay", post(pay_invoice::<N>))
         .route("/api/channel/open", post(open_channel_route::<N>))
@@ -1324,6 +1325,8 @@ struct ResolveRequest {
 #[derive(Serialize)]
 struct ResolveResponse {
     protocol_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arb_share: Option<String>,
 }
 
 async fn resolve_escrow<N: HoldNode>(
@@ -1489,7 +1492,49 @@ async fn resolve_escrow<N: HoldNode>(
     };
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &all_events).await;
-    Ok(Json(ResolveResponse { protocol_status: final_status.to_string() }))
+    let arb_share = state.store.lock().expect("escrow store mutex poisoned").get_arb_share(&id);
+    Ok(Json(ResolveResponse {
+        protocol_status: final_status.to_string(),
+        arb_share: if final_status == "settled" || final_status == "refunded" {
+            arb_share.filter(|s| !s.is_empty())
+        } else {
+            None
+        },
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArbShareRequest {
+    share: String,
+}
+
+async fn submit_arb_share<N: HoldNode>(
+    State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<ArbShareRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let owner = owner_from_headers(&headers)?;
+    {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        let record = store
+            .get(&id)
+            .filter(|r| r.seller_owner == owner || r.owner == owner)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+        if record.protocol_status == "settled" || record.protocol_status == "refunded" {
+            return Err((StatusCode::CONFLICT, "escrow is already resolved".to_string()));
+        }
+    }
+    let share = body.share.trim().to_lowercase();
+    if share.len() != 128 || !share.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "share must be 128 hex characters (64 bytes)".to_string()));
+    }
+    state
+        .store
+        .lock()
+        .expect("escrow store mutex poisoned")
+        .set_arb_share(&id, &share)
+        .map_err(|_| (StatusCode::NOT_FOUND, "escrow not found".to_string()))?;
+    Ok(StatusCode::OK)
 }
 
 #[derive(Deserialize)]

@@ -198,6 +198,13 @@ export function disputeEscrow(
   });
 }
 
+export function submitArbShare(pubkey: string, id: string, share: string): Promise<void> {
+  return request(pubkey, `/api/escrow/${id}/arb-share`, {
+    method: "POST",
+    body: JSON.stringify({ share }),
+  });
+}
+
 export function nodeInfo(pubkey: string): Promise<NodeInfo> {
   return request(pubkey, "/api/node/info");
 }
