@@ -21,16 +21,16 @@ via browser + Nostr. Users don't run their own node. See
 Preimage reconstruction is client-side (browser); the hosted node
 never stores P.
 
-Track via [GitHub issues #1–#5](https://github.com/mk-Denver/PontHTLC/issues) and [#11](https://github.com/mk-Denver/PontHTLC/issues/11).
+Track via [GitHub issues](https://github.com/mk-Denver/PontHTLC/issues).
 
 | Issue | Component | Status |
 | --- | --- | --- |
 | #1 | Hosted HTLC node daemon (multi-tenant, persistent, restart recovery) | merged |
 | #2 | Nostr escrow (NIP-59 + `pontmore/swap@1` state machine, client-side preimage) | merged |
 | #3 | Backend API (REST + WebSocket, preimage pass-through) | merged |
-| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | merged (e2e blocked on #11) |
-| #11 | Multi-node daemon (buyer + seller LDK nodes + channel open API) | in progress |
-| #5 | Docker Compose (4 services: bitcoind, relay, ponthtlc, frontend) | open |
+| #4 | Frontend web UI (Svelte, client-side Shamir reconstruction) | merged |
+| #11 | Multi-node daemon (buyer + seller LDK nodes + channel open API) | merged |
+| #5 | Docker Compose (4 services: bitcoind, relay, ponthtlc, frontend) | merged |
 
 ### MVP definition of done
 
@@ -57,7 +57,7 @@ Track via [GitHub issues #1–#5](https://github.com/mk-Denver/PontHTLC/issues) 
 
 ## Non-goals
 
-- Custodial wallet (the buyer must run their own LDK node)
+- Custodial wallet (the host runs the LDK node; users interact via browser)
 - Centralized matching / order book (P2P direct trades only)
 - Altcoin support (Bitcoin + Lightning only for MVP)
 - Regulatory compliance / KYC

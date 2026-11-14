@@ -45,7 +45,7 @@ small trades:
 | [`ponthtlc`](crates/ponthtlc) | Hosted LDK node daemon — channel management, bitcoind sync, HTTP API, escrow store | — |
 | [`ponthtlc-protocol`](crates/ponthtlc-protocol) | Pure PIP-00 + PIP-01 + PIP-02 + `swap@1` protocol layer — Nostr event construction, chain validation, state machine, fork detection, NIP-69 offers | — |
 | [`ponthtlc-nostr`](crates/ponthtlc-nostr) | NIP-04 encryption, NIP-59 gift-wrap transport (signed rumor → seal → gift wrap), WebSocket relay client | `ponthtlc-protocol` |
-| [`ponthtlc-escrow`](crates/ponthtlc-escrow) | LDK bridge — maps protocol state transitions to `create_inbound_payment_for_hash` / `claim_funds` / `fail_htlc_backwards`, plus 2-of-3 Shamir secret sharing | `ponthtlc-protocol`, `ponthtlc` |
+| [`ponthtlc-escrow`](crates/ponthtlc-escrow) | LDK bridge — maps protocol state transitions to `create_inbound_payment_for_hash` / `claim_funds` / `fail_htlc_backwards`, plus 2-of-3 Shamir secret sharing | `ponthtlc-protocol`, `lightning`, `bitcoin`, `rand` |
 | [`ponthtlc-spike`](crates/spike) | One-shot integration test — exercises the full LDK hold-invoice lifecycle against bitcoind regtest (happy / fail / hold) | `ponthtlc` |
 | [`frontend/`](frontend) | Svelte + Vite escrow UI — client-side Shamir reconstruction, NIP-59 share exchange, WebSocket events | hosted `ponthtlc` API |
 
@@ -163,8 +163,9 @@ cd frontend && npm test && npm run dev
 
 ## Status
 
-Issues #1–#4 are **merged**. The hosted daemon, PIP stack, REST API, and
-browser desks are live. Issue #11 puts a buyer node and a seller node in
-one daemon so `fund` can route through an internal channel. See
-[issue #5](https://github.com/mk-Denver/PontHTLC/issues/5) for Docker
-orchestration.
+Issues #1–#5 and #11 are **merged**. The hosted daemon, PIP stack, REST
+API, browser desks, multi-node channel topology, and MVP Docker Compose
+are live. The daemon runs buyer and seller LDK nodes in one process so
+`fund` routes through an internal channel. Security hardening issues
+(#23–#43) are merged. See
+[ROADMAP.md](ROADMAP.md) for the full status table.

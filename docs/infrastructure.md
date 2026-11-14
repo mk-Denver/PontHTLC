@@ -72,6 +72,27 @@ boundary. Offers and BOLT11 invoices travel on the same-origin
 `BroadcastChannel` (a demo bus); NIP-59 gift wraps carry share delivery
 when a relay is configured.
 
+### Fiat payment is unproven
+
+The daemon signs `swap/fiat_sent` and `swap/fiat_confirmed` on the
+user's behalf. The `payment_reference` stored at claim time is the
+Lightning payment hash — it does not tie to any specific M-Pesa transfer,
+cash handover, or bank deposit. Two escrows cannot be linked to one
+fiat payment, and there is no reversal bond, per-reference nullifier, or
+attestation oracle. Fiat is trusted on the honour system for the MVP.
+Post-MVP: attestation oracles, per-reference nullifiers, and reversal
+bonds.
+
+### Relay is a notification channel, not a source of truth
+
+The daemon acts on HTTP API calls, not on relay events. A missed relay
+publish does not block an escrow transition. The relay is a notification
+channel for clients that subscribe to kind-1059 gift wraps and kind-7301
+action events. The daemon has one default relay URL and ignores publish
+failures (logged via `eprintln`). Post-MVP: query multiple relays with
+`since` before the deadline, wait for EOSE, and treat no reply as
+unknown.
+
 ### Pontmore protocol alignment
 
 In `pontmore/swap@1` terms:
