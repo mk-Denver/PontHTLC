@@ -485,7 +485,7 @@ struct PublishOfferResponse {
 async fn publish_offer<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap, Json(body): Json<PublishOfferRequest>,
 ) -> Result<Json<PublishOfferResponse>, (StatusCode, String)> {
-    let _owner = owner_from_headers(&headers)?;
+    let owner = owner_from_headers(&headers)?;
     let signer_pk = pubkey_from_secret(&state.nostr_secret);
     let now = ponthtlc_protocol::event::now();
     let direction = ponthtlc_protocol::swap_v1::Direction::from_str(&body.direction)
@@ -518,6 +518,7 @@ async fn publish_offer<N: HoldNode>(
     {
         let mut store = state.store.lock().expect("escrow store mutex poisoned");
         let _ = store.append_event("__offers__", signed.clone());
+        let _ = store.record_offer_owner(&event_id, &owner);
     }
     let relay_url = state.relay_url.clone();
     publish_events(&relay_url, &[signed]).await;
@@ -535,13 +536,17 @@ struct OfferSummary {
     channels: Vec<String>,
     expires_at: u64,
     escrow_pubkey: String,
+    agent_pubkey: String,
 }
 
 async fn list_offers<N: HoldNode>(
     State(state): State<Arc<AppState<N>>>, headers: HeaderMap,
 ) -> Result<Json<Vec<OfferSummary>>, (StatusCode, String)> {
     let _owner = owner_from_headers(&headers)?;
-    let events = state.store.lock().expect("escrow store mutex poisoned").get_events("__offers__");
+    let (events, owners) = {
+        let store = state.store.lock().expect("escrow store mutex poisoned");
+        (store.get_events("__offers__"), store.offer_owners())
+    };
     let now = ponthtlc_protocol::event::now();
     let summaries: Vec<OfferSummary> = events
         .into_iter()
@@ -552,6 +557,8 @@ async fn list_offers<N: HoldNode>(
             if !ponthtlc_protocol::offer::is_offer_live(content, now) {
                 return None;
             }
+            let agent_pubkey =
+                owners.get(&e.id).cloned().unwrap_or_else(|| e.pubkey.clone());
             Some(OfferSummary {
                 event_id: e.id,
                 currency: content.currency.clone(),
@@ -562,6 +569,7 @@ async fn list_offers<N: HoldNode>(
                 channels: content.channels.clone(),
                 expires_at: content.expires_at,
                 escrow_pubkey: ponthtlc_protocol::offer::escrow_pk_of(content).to_string(),
+                agent_pubkey,
             })
         })
         .collect();
@@ -675,6 +683,8 @@ struct CreateRequest {
     customer_pubkey: Option<String>,
     #[serde(default)]
     quote_commitment: Option<CommitmentInput>,
+    #[serde(default)]
+    offer_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -757,6 +767,14 @@ async fn create_escrow<N: HoldNode>(
             return Err((StatusCode::BAD_REQUEST, "quote_commitment.digest must be sha256:<64 hex>".to_string()));
         }
     }
+
+    let seller_owner = body
+        .offer_id
+        .as_ref()
+        .and_then(|offer_id| {
+            state.store.lock().expect("escrow store mutex poisoned").offer_owner(offer_id)
+        })
+        .unwrap_or_default();
 
     let bolt11_invoice =
         state.node.register_hold(payment_hash, body.amount_msat, hold_invoice_expiry)
@@ -847,6 +865,7 @@ async fn create_escrow<N: HoldNode>(
             tip_id: Some(root_id.clone()),
             amount_msat: body.amount_msat,
             buyer_lightning_address: body.buyer_lightning_address.clone().unwrap_or_default(),
+            seller_owner,
             ..EscrowRecord::default()
         })
         .map_err(bad_request)?;
@@ -2345,6 +2364,102 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains(&hash_a));
         assert!(!text.contains(&hash_b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn proposals_from_an_offer_are_visible_to_the_publishing_agent() {
+        let dir = std::env::temp_dir().join("ponthtlc-http-offer-owner");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let application = app(&dir);
+        let agent = pubkey(0xa1);
+        let buyer = pubkey(0xb2);
+        let stranger = pubkey(0xc3);
+        let published = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/offer/publish",
+                &agent,
+                "{\"currency\":\"KES\",\"direction\":\"fiat_to_btc\",\"price\":\"0.01\",\"min_amount\":\"100\",\"max_amount\":\"10000\",\"channels\":[\"mpesa_phone_ke_kes@2\"]}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(published.status(), StatusCode::OK);
+        let published_body = to_bytes(published.into_body(), usize::MAX).await.unwrap();
+        let published_json: serde_json::Value = serde_json::from_slice(&published_body).unwrap();
+        let offer_id = published_json["event_id"].as_str().unwrap().to_string();
+        let listed = application
+            .clone()
+            .oneshot(json_request("GET", "/api/offers", &buyer, ""))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_body = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let listed_json: Vec<serde_json::Value> = serde_json::from_slice(&listed_body).unwrap();
+        let offer = listed_json
+            .iter()
+            .find(|offer| offer["event_id"].as_str() == Some(offer_id.as_str()))
+            .unwrap();
+        assert_eq!(offer["agent_pubkey"].as_str(), Some(agent.as_str()));
+        let hash = "77".repeat(32);
+        let created = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/escrow/create",
+                &buyer,
+                &format!(
+                    "{{\"payment_hash\":\"{hash}\",\"amount_msat\":50000,\"offer_id\":\"{offer_id}\"}}"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created_body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let id = created_json["id"].as_str().unwrap().to_string();
+        let visible = application
+            .clone()
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &agent, ""))
+            .await
+            .unwrap();
+        assert_eq!(visible.status(), StatusCode::OK);
+        let rows = application
+            .clone()
+            .oneshot(json_request("GET", "/api/escrows", &agent, ""))
+            .await
+            .unwrap();
+        assert_eq!(rows.status(), StatusCode::OK);
+        let rows_body = to_bytes(rows.into_body(), usize::MAX).await.unwrap();
+        let rows_json: Vec<serde_json::Value> = serde_json::from_slice(&rows_body).unwrap();
+        assert!(rows_json.iter().any(|row| row["id"].as_str() == Some(id.as_str())));
+        assert!(rows_json
+            .iter()
+            .any(|row| row["seller_owner"].as_str() == Some(agent.as_str())));
+        let hidden = application
+            .clone()
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &stranger, ""))
+            .await
+            .unwrap();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        let accepted = application
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/escrow/{id}/accept"),
+                &agent,
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let buyer_view = application
+            .oneshot(json_request("GET", &format!("/api/escrow/{id}"), &buyer, ""))
+            .await
+            .unwrap();
+        assert_eq!(buyer_view.status(), StatusCode::OK);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

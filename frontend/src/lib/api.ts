@@ -109,6 +109,12 @@ export function createEscrow(
   paymentHash: string,
   amountMsat: number,
   buyerLightningAddress?: string,
+  offer?: {
+    event_id: string;
+    direction: string;
+    currency: string;
+    fiat_amount: string;
+  } | null,
 ): Promise<CreateResponse> {
   return request(pubkey, "/api/escrow/create", {
     method: "POST",
@@ -116,6 +122,14 @@ export function createEscrow(
       payment_hash: paymentHash,
       amount_msat: amountMsat,
       ...(buyerLightningAddress ? { buyer_lightning_address: buyerLightningAddress } : {}),
+      ...(offer
+        ? {
+            offer_id: offer.event_id,
+            direction: offer.direction,
+            fiat_currency: offer.currency,
+            fiat_amount: offer.fiat_amount,
+          }
+        : {}),
     }),
   });
 }
@@ -237,6 +251,7 @@ export type OfferSummary = {
   channels: string[];
   expires_at: number;
   escrow_pubkey: string;
+  agent_pubkey: string;
 };
 
 export function publishOffer(

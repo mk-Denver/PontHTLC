@@ -51,15 +51,16 @@
       error = "Select an agent offer first.";
       return;
     }
+    const offer = selected;
     if (!fiatAmount || parseFloat(fiatAmount) <= 0) {
       error = "Enter a fiat amount.";
       return;
     }
     const amt = parseFloat(fiatAmount);
-    const min = parseFloat(selected.min_amount);
-    const max = parseFloat(selected.max_amount);
+    const min = parseFloat(offer.min_amount);
+    const max = parseFloat(offer.max_amount);
     if (amt < min || amt > max) {
-      error = `Amount must be between ${selected.min_amount} and ${selected.max_amount} ${selected.currency}.`;
+      error = `Amount must be between ${offer.min_amount} and ${offer.max_amount} ${offer.currency}.`;
       return;
     }
     if (!address.includes("@")) {
@@ -71,14 +72,19 @@
       const preimage = crypto.getRandomValues(new Uint8Array(32));
       const paymentHash = bytesToHex(sha256(preimage));
       const [buyer, seller, arbitrator] = splitPreimage(preimage);
-      const amountMsat = selected
-        ? Math.round(parseFloat(fiatAmount) / parseFloat(selected.price)) * 1000
-        : 50_000_000;
+      const amountMsat =
+        Math.round(parseFloat(fiatAmount) / parseFloat(offer.price)) * 1000;
       const created = await api.createEscrow(
         wallet.pubkey,
         paymentHash,
         amountMsat,
         address,
+        {
+          event_id: offer.event_id,
+          direction: offer.direction,
+          currency: offer.currency,
+          fiat_amount: fiatAmount,
+        },
       );
       const handoff = {
         mine: { x: buyer.x, hex: bytesToHex(buyer.bytes) },

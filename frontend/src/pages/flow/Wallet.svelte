@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import * as api from "../../lib/api";
   import type { EscrowRecord, OfferSummary, ChannelStatus } from "../../lib/api";
   import { wallet } from "../../lib/wallet.svelte";
@@ -37,8 +36,22 @@
     }
   }
 
-  onMount(() => {
+  $effect(() => {
+    if (!wallet.pubkey) {
+      return;
+    }
+    const intervalMs = wallet.isAgent ? 3000 : 6000;
     void refresh();
+    const close = api.openEventStream(wallet.pubkey, () => {
+      void refresh();
+    });
+    const interval = setInterval(() => {
+      void refresh();
+    }, intervalMs);
+    return () => {
+      close();
+      clearInterval(interval);
+    };
   });
 
   function title(row: EscrowRecord) {
