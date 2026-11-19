@@ -1,10 +1,13 @@
 # Cargo targets need a working Rust toolchain. On Windows, run them from the VS developer prompt.
 COMPOSE := docker compose -f docker-compose.mvp.yml
 
-.PHONY: dev down bitcoind relay test-happy test-fail test-hold test-all test-api test-unit test-restart test-nostr
+.PHONY: dev dev-bootstrap down bitcoind relay channel channel-win test-happy test-fail test-hold test-all test-api test-unit test-restart test-nostr
 
 dev:
 	$(COMPOSE) up --build
+
+dev-bootstrap:
+	$(COMPOSE) --profile bootstrap up --build
 
 down:
 	$(COMPOSE) down
@@ -14,6 +17,12 @@ bitcoind:
 
 relay:
 	$(COMPOSE) up -d --wait nostr-relay
+
+channel:
+	bash scripts/open-channel.sh
+
+channel-win:
+	powershell -ExecutionPolicy Bypass -File scripts/open-channel.ps1
 
 test-happy: bitcoind
 	cargo run -p ponthtlc-spike -- --scenario happy

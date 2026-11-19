@@ -3,7 +3,9 @@
 **/target
 spike-data/
 test-data/
+daemon-data/
 *.log
+*.err
 .DS_Store
 Thumbs.db
 frontend/node_modules/
