@@ -34,6 +34,7 @@ services:
       start_period: 5s
 
   ponthtlc:
+    image: ponthtlc:mvp
     build:
       context: .
       dockerfile: Dockerfile
@@ -53,6 +54,27 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+
+  channel-init:
+    profiles: ["bootstrap"]
+    image: ponthtlc:mvp
+    entrypoint: ["/bin/sh", "/open-channel.sh"]
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+      ponthtlc:
+        condition: service_healthy
+    environment:
+      BITCOIND_URL: http://bitcoind:18923
+      DAEMON_URL: http://ponthtlc:9800
+      RPC_USER: ponthtlc
+      RPC_PASS: ponthtlc
+      WALLET: spike
+      CAPACITY_SATOSHIS: "1000000"
+      CONFIRMATIONS: "6"
+    volumes:
+      - ./scripts/open-channel.sh:/open-channel.sh:ro
+    restart: "no"
 
   frontend:
     build:

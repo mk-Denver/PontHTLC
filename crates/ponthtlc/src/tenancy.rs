@@ -87,6 +87,8 @@ struct DiskState {
     event_chains: std::collections::HashMap<String, Vec<NostrEvent>>,
     #[serde(default)]
     balances: Vec<BalanceEntry>,
+    #[serde(default)]
+    offer_owners: std::collections::HashMap<String, String>,
 }
 
 pub struct EscrowStore {
@@ -126,6 +128,19 @@ impl EscrowStore {
         self.state.escrows.iter().map(|record| record.id.clone()).collect()
     }
 
+    pub fn record_offer_owner(&mut self, event_id: &str, owner: &str) -> Result<(), String> {
+        self.state.offer_owners.insert(event_id.to_string(), owner.to_string());
+        self.persist()
+    }
+
+    pub fn offer_owner(&self, event_id: &str) -> Option<String> {
+        self.state.offer_owners.get(event_id).cloned()
+    }
+
+    pub fn offer_owners(&self) -> std::collections::HashMap<String, String> {
+        self.state.offer_owners.clone()
+    }
+
     pub fn list_visible(&self, owner: &str) -> Vec<EscrowRecord> {
         self.state
             .escrows
@@ -149,7 +164,8 @@ impl EscrowStore {
 
     pub fn visible_hash(&self, owner: &str, payment_hash: &str) -> bool {
         self.state.escrows.iter().any(|record| {
-            record.owner == owner && record.payment_hash == payment_hash
+            (record.owner == owner || record.seller_owner == owner)
+                && record.payment_hash == payment_hash
         }) || self.state.outgoing.iter().any(|payment| {
             payment.payer == owner && payment.payment_hash == payment_hash
         })

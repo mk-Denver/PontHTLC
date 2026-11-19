@@ -127,8 +127,14 @@ cargo run -p ponthtlc-spike -- --scenario happy
 One command starts bitcoind, the Nostr relay, the hosted daemon, and the frontend:
 
 ```bash
-docker compose -f docker-compose.mvp.yml up --build
+docker compose -f docker-compose.mvp.yml --profile bootstrap up --build
 ```
+
+The `bootstrap` profile runs `channel-init`, which waits for bitcoind and
+the daemon, funds the regtest `spike` wallet, opens a 1,000,000-sat channel
+between the daemon's buyer and seller nodes, mines confirmations, and
+exits once the channel is usable. Omit `--profile bootstrap` if you prefer
+to open the channel manually.
 
 `http://127.0.0.1:9800/health/live` returns `ok`. The escrow dashboard is at `http://127.0.0.1:5173`. It is a phone-width flow: Wallet, New swap, the swap (Lock, Pay fiat, Confirm, Release), Chat, Me, and Desk. Create a swap with the buyer's Lightning address. The other person funds it and leaves their own Lightning address. Settled sats are paid to the buyer's address. A failed hold is paid to the seller's address. There is no withdraw button. `make test-happy`, `make test-fail`, and `make test-hold` run the spike scenarios. `scripts/integration-test.sh` brings the stack up, checks health, then runs the relay, API, and restart tests.
 
@@ -139,6 +145,22 @@ docker compose -f docker-compose.mvp.yml up --build
 ```
 
 A passing run ends with `SPIKE_RESULT: PASS scenario=<scenario>`.
+
+### Open a channel (native daemon)
+
+When bitcoind runs in Docker and the daemon runs natively, open the
+buyer↔seller channel from the host:
+
+```powershell
+.\scripts\open-channel.ps1      # Windows
+# make channel                  # Linux / macOS (bash)
+```
+
+The script is idempotent: it exits immediately if a usable channel
+already exists, otherwise it funds the `spike` wallet, opens a
+1,000,000-sat channel, mines confirmations, and waits until it is usable.
+Set `CAPACITY_SATOSHIS`, `CONFIRMATIONS`, or `DAEMON_URL` to override
+the defaults.
 
 ## Testing
 
