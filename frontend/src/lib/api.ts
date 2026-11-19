@@ -125,9 +125,9 @@ export function createEscrow(
       ...(offer
         ? {
             offer_id: offer.event_id,
-            direction: offer.direction,
-            fiat_currency: offer.currency,
-            fiat_amount: offer.fiat_amount,
+            direction: String(offer.direction),
+            fiat_currency: String(offer.currency),
+            fiat_amount: String(offer.fiat_amount),
           }
         : {}),
     }),
